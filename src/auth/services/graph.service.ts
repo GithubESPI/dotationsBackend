@@ -51,11 +51,16 @@ export class GraphService {
   /**
    * Récupère la photo de profil de l'utilisateur depuis Microsoft Graph API
    * @param accessToken Token d'accès Azure AD
+   * @param userId ID de l'utilisateur (optionnel, par défaut /me)
    * @returns Photo de profil en base64
    */
-  async getUserPhoto(accessToken: string): Promise<string | null> {
+  async getUserPhoto(accessToken: string, userId?: string): Promise<string | null> {
     try {
-      const response = await axios.get(`${this.graphApiBaseUrl}/me/photo/$value`, {
+      const endpoint = userId 
+        ? `${this.graphApiBaseUrl}/users/${userId}/photo/$value`
+        : `${this.graphApiBaseUrl}/me/photo/$value`;
+      
+      const response = await axios.get(endpoint, {
         headers: {
           Authorization: `Bearer ${accessToken}`,
         },
@@ -73,6 +78,68 @@ export class GraphService {
       }
       console.warn('Impossible de récupérer la photo de profil:', error.message);
       return null;
+    }
+  }
+
+  /**
+   * Récupère toutes les informations d'un utilisateur depuis Microsoft Graph API
+   * @param accessToken Token d'accès Azure AD
+   * @param userId ID de l'utilisateur (optionnel, par défaut /me)
+   * @returns Informations complètes de l'utilisateur
+   */
+  async getAllUserDetails(accessToken: string, userId?: string): Promise<any> {
+    try {
+      const endpoint = userId 
+        ? `${this.graphApiBaseUrl}/users/${userId}`
+        : `${this.graphApiBaseUrl}/me`;
+      
+      const response = await axios.get(endpoint, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        params: {
+          $select: [
+            'id',
+            'displayName',
+            'mail',
+            'userPrincipalName',
+            'givenName',
+            'surname',
+            'jobTitle',
+            'department',
+            'officeLocation',
+            'mobilePhone',
+            'businessPhones',
+            'officePhone',
+            'city',
+            'country',
+            'postalCode',
+            'streetAddress',
+            'state',
+            'companyName',
+            'employeeId',
+            'employeeType',
+            'employeeHireDate',
+            'preferredLanguage',
+            'usageLocation',
+            'userType',
+            'accountEnabled',
+            'manager',
+          ].join(','),
+          $expand: 'manager($select=id,displayName,userPrincipalName)',
+        },
+      });
+
+      return response.data;
+    } catch (error: any) {
+      if (error.response) {
+        console.error('Erreur Graph API:', error.response.status, error.response.data);
+        throw new UnauthorizedException(
+          `Erreur lors de la récupération des détails utilisateur depuis Microsoft Graph: ${error.response.data?.error?.message || 'Erreur inconnue'}`,
+        );
+      }
+      throw new UnauthorizedException('Erreur lors de la connexion à Microsoft Graph API');
     }
   }
 

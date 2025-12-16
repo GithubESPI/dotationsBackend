@@ -20,7 +20,7 @@ export class EmployeesService {
    * Créer ou mettre à jour un employé depuis les données Office 365
    * Les employés ne peuvent être créés que via la synchronisation Office 365
    */
-  async createOrUpdateFromGraph(graphUser: any): Promise<UserDocument> {
+  async createOrUpdateFromGraph(graphUser: any, accessToken?: string): Promise<UserDocument> {
     // Utiliser userPrincipalName comme identifiant unique Office 365
     const office365Id = graphUser.userPrincipalName || graphUser.id;
     
@@ -28,9 +28,9 @@ export class EmployeesService {
       throw new BadRequestException('userPrincipalName ou id manquant dans les données Graph');
     }
 
-    // Préparer les données depuis Graph API
+    // Préparer les données depuis Graph API avec toutes les propriétés disponibles
     // Référence: https://learn.microsoft.com/fr-fr/graph/api/resources/users
-    const employeeData = {
+    const employeeData: any = {
       office365Id: office365Id,
       email: graphUser.mail || graphUser.userPrincipalName,
       displayName: graphUser.displayName || '',
@@ -40,14 +40,58 @@ export class EmployeesService {
       department: graphUser.department,
       officeLocation: graphUser.officeLocation,
       mobilePhone: graphUser.mobilePhone || graphUser.businessPhones?.[0],
+      officePhone: graphUser.officePhone,
+      businessPhones: graphUser.businessPhones,
+      city: graphUser.city,
+      country: graphUser.country,
+      postalCode: graphUser.postalCode,
+      streetAddress: graphUser.streetAddress,
+      state: graphUser.state,
+      companyName: graphUser.companyName,
+      employeeId: graphUser.employeeId,
+      employeeType: graphUser.employeeType,
+      employeeHireDate: graphUser.employeeHireDate ? new Date(graphUser.employeeHireDate) : undefined,
+      preferredLanguage: graphUser.preferredLanguage,
+      usageLocation: graphUser.usageLocation,
+      userType: graphUser.userType,
+      accountEnabled: graphUser.accountEnabled !== false,
       isActive: graphUser.accountEnabled !== false, // Par défaut actif sauf si explicitement désactivé
+      officeName: graphUser.officeName,
+      division: graphUser.division,
+      costCenter: graphUser.costCenter,
+      employeeOrgData: graphUser.employeeOrgData,
+      onPremisesExtensionAttributes: graphUser.onPremisesExtensionAttributes,
+      businessUnit: graphUser.businessUnit,
+      employeeNumber: graphUser.employeeNumber,
       lastSync: new Date(),
     };
+
+    // Gérer le manager si disponible
+    if (graphUser.manager) {
+      employeeData.managerId = graphUser.manager.id || graphUser.manager.userPrincipalName;
+      employeeData.managerDisplayName = graphUser.manager.displayName;
+      employeeData.managerEmail = graphUser.manager.mail || graphUser.manager.userPrincipalName;
+    }
 
     // Chercher l'employé existant par office365Id (identifiant unique)
     const existingEmployee = await this.userModel.findOne({
       office365Id: employeeData.office365Id,
     });
+
+        // Récupérer la photo de profil si un token est fourni
+        if (accessToken && graphUser.id) {
+          try {
+            const photo = await this.graphService.getUserPhoto(accessToken, graphUser.id);
+            if (photo) {
+              employeeData.profilePicture = photo;
+              // Stocker aussi l'URL de la photo Graph API
+              employeeData.profilePictureUrl = `https://graph.microsoft.com/v1.0/users/${graphUser.id}/photo/$value`;
+            }
+          } catch (error: any) {
+            // La photo peut ne pas exister, ce n'est pas une erreur critique
+            this.logger.debug(`   Photo non disponible pour ${graphUser.userPrincipalName}`);
+          }
+        }
 
     if (existingEmployee) {
       // Mettre à jour avec les nouvelles données depuis Office 365
@@ -76,7 +120,7 @@ export class EmployeesService {
 
     try {
       do {
-        // Sélectionner les propriétés nécessaires selon la documentation Graph API
+        // Sélectionner TOUTES les propriétés disponibles selon la documentation Graph API
         // Référence: https://learn.microsoft.com/fr-fr/graph/api/resources/users
         const baseUrl = 'https://graph.microsoft.com/v1.0/users';
         const selectParams = [
@@ -91,10 +135,30 @@ export class EmployeesService {
           'officeLocation',
           'mobilePhone',
           'businessPhones',
-          'accountEnabled', // Pour savoir si l'utilisateur est actif
+          'officePhone',
+          'city',
+          'country',
+          'postalCode',
+          'streetAddress',
+          'state',
+          'companyName',
+          'employeeId',
+          'employeeType',
+          'employeeHireDate',
+          'preferredLanguage',
+          'usageLocation',
+          'userType',
+          'accountEnabled',
+          'officeName',
+          'division',
+          'costCenter',
+          'employeeOrgData',
+          'onPremisesExtensionAttributes',
+          'businessUnit',
+          'employeeNumber',
         ].join(',');
         
-        const url = nextLink || `${baseUrl}?$select=${selectParams}&$top=999`;
+        const url = nextLink || `${baseUrl}?$select=${selectParams}&$expand=manager($select=id,displayName,userPrincipalName)&$top=999`;
         
         this.logger.debug(`   Requête: ${url.replace(accessToken.substring(0, 20), '***')}`);
         
@@ -139,7 +203,7 @@ export class EmployeesService {
               continue;
             }
 
-            await this.createOrUpdateFromGraph(graphUser);
+            await this.createOrUpdateFromGraph(graphUser, accessToken);
             synced++;
           } catch (error: any) {
             this.logger.error(`   Erreur lors de la synchronisation de ${graphUser.userPrincipalName || graphUser.id}:`, error.message);
