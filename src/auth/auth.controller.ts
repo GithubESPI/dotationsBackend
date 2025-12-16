@@ -9,6 +9,7 @@ import {
   HttpStatus,
   Query,
   Body,
+  BadRequestException,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -226,9 +227,21 @@ export class AuthController {
 
       const result = await this.authService.login(req.user, azureAccessToken);
       
-      // Rediriger vers le frontend avec le token
+      // Stocker le token Azure AD dans la session pour utilisation ultérieure
+      if (azureAccessToken && req.session) {
+        req.session.azureAccessToken = azureAccessToken;
+        req.session.userId = req.user.id;
+      }
+      
+      // Rediriger vers le frontend avec le token JWT et le token Azure AD
       const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3001';
-      const redirectUrl = `${frontendUrl}/callback?token=${encodeURIComponent(result.access_token)}`;
+      const params = new URLSearchParams({
+        token: result.access_token,
+      });
+      if (result.azure_access_token) {
+        params.append('azure_token', result.azure_access_token);
+      }
+      const redirectUrl = `${frontendUrl}/callback?${params.toString()}`;
       
       console.log(`🔄 Redirection vers: ${frontendUrl}/callback`);
       return res.redirect(redirectUrl);
@@ -346,13 +359,29 @@ export class AuthController {
     status: 200,
     description: 'Liste des groupes',
   })
-  async getGraphGroups(@Query('token') token?: string, @CurrentUser() user?: UserPayload) {
-    if (!token && user && (user as any).azureAccessToken) {
-      token = (user as any).azureAccessToken;
+  async getGraphGroups(
+    @Query('token') token?: string,
+    @CurrentUser() user?: UserPayload,
+    @Request() req?: any,
+  ) {
+    // 1. Essayer depuis le paramètre query
+    if (!token) {
+      // 2. Essayer depuis la session (si disponible)
+      if (req?.session?.azureAccessToken && req.session.userId === user?.id) {
+        token = req.session.azureAccessToken;
+      }
+      // 3. Essayer depuis le user (si stocké dans le JWT - non implémenté actuellement)
+      else if (user && (user as any).azureAccessToken) {
+        token = (user as any).azureAccessToken;
+      }
     }
     
     if (!token) {
-      throw new Error('Token Azure AD requis');
+      throw new BadRequestException(
+        'Token Azure AD requis. ' +
+        'Fournissez-le via le paramètre query "token" ou ' +
+        'assurez-vous que le token Azure AD est stocké dans localStorage (clé "azure_access_token") après la connexion.'
+      );
     }
 
     const groups = await this.graphService.getUserGroups(token);

@@ -1,0 +1,19 @@
+services:
+  mongodb:
+    image: mongo:latest
+    container_name: mongodb_dotation
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      # Crée automatiquement l'utilisateur root au premier démarrage
+      MONGO_INITDB_ROOT_USERNAME: dotation
+      MONGO_INITDB_ROOT_PASSWORD: dotation_password
+    volumes:
+      # Persistance des données (ne perdez rien si le conteneur redémarre)
+      - mongodb_dotation_data:/data/db
+    # Active le mode authentification obligatoire
+    command: ["mongod", "--auth"]
+
+volumes:
+  mongodb_dotation_data:
