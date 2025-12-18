@@ -54,8 +54,20 @@ export class ReturnsService {
     }
 
     // Vérifier que les matériels existent
+    const validEquipmentIds = returnEquipmentIds.filter(
+      id => id && id.trim() !== '' && Types.ObjectId.isValid(id)
+    );
+    
+    if (validEquipmentIds.length === 0) {
+      throw new BadRequestException('Aucun matériel valide fourni');
+    }
+    
+    if (validEquipmentIds.length !== returnEquipmentIds.length) {
+      throw new BadRequestException('Un ou plusieurs IDs de matériel sont invalides');
+    }
+    
     const equipments = await this.equipmentModel.find({
-      _id: { $in: returnEquipmentIds.map(id => new Types.ObjectId(id)) },
+      _id: { $in: validEquipmentIds.map(id => new Types.ObjectId(id)) },
     }).exec();
 
     if (equipments.length !== returnEquipmentIds.length) {

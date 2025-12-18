@@ -182,5 +182,59 @@ export class JiraAssetController {
     });
     return { message: 'Statut Jira mis à jour avec succès' };
   }
+
+  @Get('schema/:schemaName')
+  @ApiOperation({ 
+    summary: 'Récupérer tous les objets d\'un schéma',
+    description: 'Récupère tous les objets d\'un schéma spécifique (ex: "Parc Informatique") via l\'API AQL',
+  })
+  @ApiParam({ name: 'schemaName', description: 'Nom du schéma (ex: "Parc Informatique")' })
+  @ApiResponse({
+    status: 200,
+    description: 'Objets récupérés avec succès',
+  })
+  async getAllAssetsFromSchema(@Param('schemaName') schemaName: string) {
+    const assets = await this.jiraAssetService.getAllAssetsFromSchema(schemaName);
+    return {
+      schemaName,
+      count: assets.length,
+      assets,
+    };
+  }
+
+  @Post('sync/schema/:schemaName')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ 
+    summary: 'Synchroniser tous les équipements d\'un schéma depuis Jira',
+    description: 'Récupère tous les objets du schéma "Parc Informatique" et les synchronise automatiquement vers MongoDB',
+  })
+  @ApiParam({ name: 'schemaName', description: 'Nom du schéma (ex: "Parc Informatique")' })
+  @ApiResponse({
+    status: 200,
+    description: 'Synchronisation terminée',
+    schema: {
+      type: 'object',
+      properties: {
+        created: { type: 'number' },
+        updated: { type: 'number' },
+        errors: { type: 'number' },
+        skipped: { type: 'number' },
+      },
+    },
+  })
+  async syncAllFromSchema(
+    @Param('schemaName') schemaName: string,
+    @Body() dto: SyncAllFromJiraDto,
+  ) {
+    return this.jiraAssetService.syncAllFromSchema(schemaName, {
+      serialNumberAttrId: dto.serialNumberAttrId,
+      brandAttrId: dto.brandAttrId,
+      modelAttrId: dto.modelAttrId,
+      typeAttrId: dto.typeAttrId,
+      statusAttrId: dto.statusAttrId,
+      internalIdAttrId: dto.internalIdAttrId,
+      assignedUserAttrId: dto.assignedUserAttrId,
+    });
+  }
 }
 

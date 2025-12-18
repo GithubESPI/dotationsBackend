@@ -30,9 +30,20 @@ export class AllocationsService {
     }
 
     // Vérifier que tous les matériels existent et sont disponibles
-    const equipmentIds = createDto.equipments.map(eq => eq.equipmentId);
+    const equipmentIds = createDto.equipments
+      .map(eq => eq.equipmentId)
+      .filter(id => id && id.trim() !== '' && Types.ObjectId.isValid(id));
+    
+    if (equipmentIds.length === 0) {
+      throw new BadRequestException('Aucun matériel valide fourni');
+    }
+    
+    if (equipmentIds.length !== createDto.equipments.length) {
+      throw new BadRequestException('Un ou plusieurs IDs de matériel sont invalides');
+    }
+    
     const equipments = await this.equipmentModel.find({
-      _id: { $in: equipmentIds },
+      _id: { $in: equipmentIds.map(id => new Types.ObjectId(id)) },
     }).exec();
 
     if (equipments.length !== equipmentIds.length) {

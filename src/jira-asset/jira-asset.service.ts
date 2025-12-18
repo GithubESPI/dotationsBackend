@@ -38,20 +38,47 @@ export class JiraAssetService {
   private readonly logger = new Logger(JiraAssetService.name);
   private workspaceId: string | null = null;
   private readonly baseUrl: string;
+  private readonly baseUrlAssets: string;
+  private readonly basePathAssets: string;
   private readonly apiToken: string;
+  private readonly apiTokenAssets: string;
   private readonly email: string;
+  private readonly emailAssets: string;
 
   constructor(
     private readonly configService: ConfigService,
     private readonly httpService: HttpService,
     @InjectModel(Equipment.name) private equipmentModel: Model<EquipmentDocument>,
   ) {
+    // Variables pour l'API Jira classique (rétrocompatibilité)
     this.baseUrl = this.configService.get<string>('JIRA_BASE_URL') || '';
     this.apiToken = this.configService.get<string>('JIRA_API_TOKEN') || '';
     this.email = this.configService.get<string>('JIRA_EMAIL') || '';
 
-    if (!this.baseUrl || !this.apiToken || !this.email) {
-      this.logger.warn('⚠️ Configuration Jira Asset incomplète. Vérifiez JIRA_BASE_URL, JIRA_API_TOKEN et JIRA_EMAIL dans .env');
+    // Variables pour l'API Jira Assets (nouvelle configuration)
+    this.baseUrlAssets = this.configService.get<string>('JIRA_BASE_URL_ASSETS') || this.baseUrl;
+    this.basePathAssets = this.configService.get<string>('JIRA_BASE_PATH_ASSETS') || '';
+    this.apiTokenAssets = this.configService.get<string>('JIRA_TOKEN_ASSETS') || this.apiToken;
+    this.emailAssets = this.configService.get<string>('JIRA_EMAIL_ASSETS') || this.email;
+
+    if (!this.baseUrlAssets || !this.apiTokenAssets || !this.emailAssets) {
+      this.logger.warn('⚠️ Configuration Jira Asset incomplète. Vérifiez JIRA_BASE_URL_ASSETS, JIRA_TOKEN_ASSETS et JIRA_EMAIL_ASSETS dans .env');
+    }
+  }
+
+  /**
+   * Construire l'URL complète pour l'API Jira Assets
+   */
+  private buildAssetsUrl(endpoint: string): string {
+    const baseUrl = this.baseUrlAssets.replace(/\/$/, ''); // Enlever le slash final
+    if (this.basePathAssets) {
+      // Si JIRA_BASE_PATH_ASSETS est fourni, l'utiliser directement
+      const basePath = this.basePathAssets.replace(/^\/+/, '').replace(/\/+$/, '');
+      const endpointPath = endpoint.replace(/^\/+/, '');
+      return `${baseUrl}/${basePath}/${endpointPath}`.replace(/\/+/g, '/').replace(/https:\//, 'https://');
+    } else {
+      // Sinon, construire avec le workspace ID
+      return `${baseUrl}${endpoint}`;
     }
   }
 
@@ -63,13 +90,28 @@ export class JiraAssetService {
       return this.workspaceId;
     }
 
+    // Si JIRA_BASE_PATH_ASSETS contient déjà le workspace ID, l'extraire
+    if (this.basePathAssets) {
+      const workspaceMatch = this.basePathAssets.match(/workspace\/([a-f0-9-]+)/i);
+      if (workspaceMatch && workspaceMatch[1]) {
+        this.workspaceId = workspaceMatch[1];
+        this.logger.log(`✅ Workspace ID extrait du chemin: ${this.workspaceId}`);
+        return this.workspaceId;
+      }
+    }
+
+    // Sinon, récupérer via l'API
     try {
+      const workspaceUrl = this.basePathAssets 
+        ? `${this.baseUrlAssets.replace(/\/$/, '')}${this.basePathAssets.replace(/^\/+/, '/')}/workspace`
+        : `${this.baseUrlAssets.replace(/\/$/, '')}/rest/servicedeskapi/assets/workspace`;
+      
       const response = await firstValueFrom(
         this.httpService.get<{ values: JiraAssetWorkspace[] }>(
-          `${this.baseUrl}/rest/servicedeskapi/assets/workspace`,
+          workspaceUrl,
           {
             headers: {
-              Authorization: `Basic ${Buffer.from(`${this.email}:${this.apiToken}`).toString('base64')}`,
+              Authorization: `Basic ${Buffer.from(`${this.emailAssets}:${this.apiTokenAssets.replace(/^["']|["']$/g, '')}`).toString('base64')}`,
               Accept: 'application/json',
             },
           },
@@ -90,6 +132,143 @@ export class JiraAssetService {
   }
 
   /**
+   * Récupérer tous les objets d'un schéma spécifique via AQL (Asset Query Language)
+   * @param schemaName Nom du schéma (ex: "Parc Informatique")
+   * @param limit Limite du nombre d'objets à récupérer (défaut: 1000)
+   */
+  async getAllAssetsFromSchema(schemaName: string, limit: number = 1000): Promise<JiraAssetObjectResponse[]> {
+    const workspaceId = await this.getWorkspaceId();
+    const allAssets: JiraAssetObjectResponse[] = [];
+    let start = 0;
+    const pageSize = 100; // Taille de page recommandée pour l'API
+
+    try {
+      this.logger.log(`🔍 Récupération des objets du schéma "${schemaName}"...`);
+
+      // Construire l'URL en utilisant JIRA_BASE_URL_ASSETS et JIRA_BASE_PATH_ASSETS si disponible
+      const searchUrl = this.buildAssetsUrl('aql/objects');
+
+      while (true) {
+        const aqlBody = {
+          qlQuery: `objectSchema = "${schemaName}"`,
+          start,
+          limit: pageSize,
+        };
+        
+        const response = await firstValueFrom(
+          this.httpService.post<{ values: JiraAssetObjectResponse[]; size: number; start: number; limit: number }>(
+            searchUrl,
+            aqlBody,
+            {
+              headers: {
+                Authorization: `Basic ${Buffer.from(`${this.emailAssets}:${this.apiTokenAssets.replace(/^["']|["']$/g, '')}`).toString('base64')}`,
+                Accept: 'application/json',
+                'Content-Type': 'application/json',
+              },
+            },
+          ),
+        );
+
+        const assets = response.data.values || [];
+        allAssets.push(...assets);
+
+        this.logger.debug(`📦 ${assets.length} objets récupérés (total: ${allAssets.length})`);
+
+        // Vérifier s'il y a plus de résultats
+        if (assets.length < pageSize || allAssets.length >= limit) {
+          break;
+        }
+
+        start += pageSize;
+      }
+
+      this.logger.log(`✅ ${allAssets.length} objets récupérés du schéma "${schemaName}"`);
+      return allAssets.slice(0, limit); // Limiter au nombre demandé
+    } catch (error: any) {
+      this.logger.error(`❌ Erreur lors de la récupération des objets du schéma "${schemaName}": ${error.message}`);
+      if (error.response) {
+        this.logger.error(`Détails: ${JSON.stringify(error.response.data)}`);
+      }
+      throw new BadRequestException(`Impossible de récupérer les objets du schéma "${schemaName}": ${error.message}`);
+    }
+  }
+
+  /**
+   * Synchroniser tous les équipements du schéma "Parc Informatique" depuis Jira
+   * Cette méthode récupère automatiquement tous les objets du schéma et les synchronise vers MongoDB
+   */
+  async syncAllFromSchema(
+    schemaName: string,
+    attributeMapping: {
+      serialNumberAttrId: string;
+      brandAttrId: string;
+      modelAttrId: string;
+      typeAttrId: string;
+      statusAttrId?: string;
+      internalIdAttrId?: string;
+      assignedUserAttrId?: string;
+    },
+  ): Promise<{ created: number; updated: number; errors: number; skipped: number }> {
+    const results = { created: 0, updated: 0, errors: 0, skipped: 0 };
+
+    try {
+      this.logger.log(`🔄 Début de la synchronisation depuis le schéma "${schemaName}"...`);
+      
+      // Récupérer tous les assets du schéma via AQL
+      const jiraAssets = await this.getAllAssetsFromSchema(schemaName);
+      
+      this.logger.log(`📦 ${jiraAssets.length} assets trouvés dans le schéma "${schemaName}"`);
+
+      for (const jiraAsset of jiraAssets) {
+        try {
+          // Vérifier si l'asset a un numéro de série (requis)
+          const serialNumberAttr = jiraAsset.attributes.find(
+            a => a.objectTypeAttributeId === attributeMapping.serialNumberAttrId
+          );
+          
+          if (!serialNumberAttr || !serialNumberAttr.objectAttributeValues[0]?.value) {
+            this.logger.warn(`⚠️ Asset ${jiraAsset.id} ignoré: numéro de série manquant`);
+            results.skipped++;
+            continue;
+          }
+
+          const existingBefore = await this.equipmentModel.findOne({ 
+            $or: [
+              { jiraAssetId: jiraAsset.id },
+              { serialNumber: serialNumberAttr.objectAttributeValues[0].value.toString() }
+            ]
+          }).exec();
+
+          await this.syncEquipmentFromJira(jiraAsset.id, jiraAsset.objectTypeId, {
+            serialNumberAttrId: attributeMapping.serialNumberAttrId,
+            brandAttrId: attributeMapping.brandAttrId,
+            modelAttrId: attributeMapping.modelAttrId,
+            typeAttrId: attributeMapping.typeAttrId,
+            statusAttrId: attributeMapping.statusAttrId,
+            internalIdAttrId: attributeMapping.internalIdAttrId,
+            assignedUserAttrId: attributeMapping.assignedUserAttrId,
+          });
+
+          if (existingBefore) {
+            results.updated++;
+          } else {
+            results.created++;
+          }
+        } catch (error: any) {
+          this.logger.error(`❌ Erreur lors de la synchronisation de l'asset ${jiraAsset.id}: ${error.message}`);
+          results.errors++;
+        }
+      }
+
+      this.logger.log(`✅ Synchronisation terminée: ${results.created} créés, ${results.updated} mis à jour, ${results.skipped} ignorés, ${results.errors} erreurs`);
+      return results;
+    } catch (error: any) {
+      this.logger.error(`❌ Erreur lors de la synchronisation complète: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
    * Créer un objet Asset dans Jira
    */
   async createAssetInJira(
@@ -99,16 +278,17 @@ export class JiraAssetService {
     const workspaceId = await this.getWorkspaceId();
 
     try {
+      const createUrl = this.buildAssetsUrl('object/create');
       const response = await firstValueFrom(
         this.httpService.post<JiraAssetObjectResponse>(
-          `https://api.atlassian.com/jsm/insight/workspace/${workspaceId}/v1/object/create`,
+          createUrl,
           {
             objectTypeId,
             attributes,
           },
           {
             headers: {
-              Authorization: `Basic ${Buffer.from(`${this.email}:${this.apiToken}`).toString('base64')}`,
+              Authorization: `Basic ${Buffer.from(`${this.emailAssets}:${this.apiTokenAssets.replace(/^["']|["']$/g, '')}`).toString('base64')}`,
               Accept: 'application/json',
               'Content-Type': 'application/json',
             },
@@ -137,15 +317,16 @@ export class JiraAssetService {
     const workspaceId = await this.getWorkspaceId();
 
     try {
+      const updateUrl = this.buildAssetsUrl(`object/${objectId}`);
       const response = await firstValueFrom(
         this.httpService.put<JiraAssetObjectResponse>(
-          `https://api.atlassian.com/jsm/insight/workspace/${workspaceId}/v1/object/${objectId}`,
+          updateUrl,
           {
             attributes,
           },
           {
             headers: {
-              Authorization: `Basic ${Buffer.from(`${this.email}:${this.apiToken}`).toString('base64')}`,
+              Authorization: `Basic ${Buffer.from(`${this.emailAssets}:${this.apiTokenAssets.replace(/^["']|["']$/g, '')}`).toString('base64')}`,
               Accept: 'application/json',
               'Content-Type': 'application/json',
             },
@@ -171,12 +352,13 @@ export class JiraAssetService {
     const workspaceId = await this.getWorkspaceId();
 
     try {
+      const getUrl = this.buildAssetsUrl(`object/${objectId}`);
       const response = await firstValueFrom(
         this.httpService.get<JiraAssetObjectResponse>(
-          `https://api.atlassian.com/jsm/insight/workspace/${workspaceId}/v1/object/${objectId}`,
+          getUrl,
           {
             headers: {
-              Authorization: `Basic ${Buffer.from(`${this.email}:${this.apiToken}`).toString('base64')}`,
+              Authorization: `Basic ${Buffer.from(`${this.emailAssets}:${this.apiTokenAssets.replace(/^["']|["']$/g, '')}`).toString('base64')}`,
               Accept: 'application/json',
             },
           },
@@ -203,9 +385,10 @@ export class JiraAssetService {
     try {
       // Utiliser l'API de recherche Jira Asset
       // Note: L'API exacte peut varier selon la version de Jira Asset
+      const searchUrl = this.buildAssetsUrl('object/navlist/iql');
       const response = await firstValueFrom(
         this.httpService.post<{ values: JiraAssetObjectResponse[] }>(
-          `https://api.atlassian.com/jsm/insight/workspace/${workspaceId}/v1/object/navlist/iql`,
+          searchUrl,
           {
             objectTypeId,
             iql: query || '',
@@ -213,7 +396,7 @@ export class JiraAssetService {
           },
           {
             headers: {
-              Authorization: `Basic ${Buffer.from(`${this.email}:${this.apiToken}`).toString('base64')}`,
+              Authorization: `Basic ${Buffer.from(`${this.emailAssets}:${this.apiTokenAssets.replace(/^["']|["']$/g, '')}`).toString('base64')}`,
               Accept: 'application/json',
               'Content-Type': 'application/json',
             },
