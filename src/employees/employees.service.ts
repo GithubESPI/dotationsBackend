@@ -156,6 +156,8 @@ export class EmployeesService {
           'onPremisesExtensionAttributes',
           'businessUnit',
           'employeeNumber',
+          'profilePicture',
+          'profilePictureUrl',
         ].join(',');
         
         const url = nextLink || `${baseUrl}?$select=${selectParams}&$expand=manager($select=id,displayName,userPrincipalName)&$top=999`;
