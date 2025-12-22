@@ -4,7 +4,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
-import { Equipment, EquipmentDocument, EquipmentStatus } from '../database/schemas/equipment.schema';
+import { Equipment, EquipmentDocument, EquipmentStatus, EquipmentType } from '../database/schemas/equipment.schema';
 
 interface JiraAssetWorkspace {
   workspaceId: string;
@@ -146,7 +146,8 @@ export class JiraAssetService {
       this.logger.log(`🔍 Récupération des objets du schéma "${schemaName}"...`);
 
       // Construire l'URL en utilisant JIRA_BASE_URL_ASSETS et JIRA_BASE_PATH_ASSETS si disponible
-      const searchUrl = this.buildAssetsUrl('aql/objects');
+      // L'endpoint correct est /object/aql (pas /aql/objects)
+      const searchUrl = this.buildAssetsUrl('object/aql');
 
       while (true) {
         const aqlBody = {
@@ -190,6 +191,295 @@ export class JiraAssetService {
         this.logger.error(`Détails: ${JSON.stringify(error.response.data)}`);
       }
       throw new BadRequestException(`Impossible de récupérer les objets du schéma "${schemaName}": ${error.message}`);
+    }
+  }
+
+  /**
+   * Récupérer tous les objets d'un type d'objet spécifique dans un schéma
+   * @param schemaName Nom du schéma (ex: "Parc Informatique")
+   * @param objectTypeName Nom du type d'objet (ex: "Laptop")
+   * @param limit Limite du nombre d'objets à récupérer (défaut: 1000)
+   */
+  async getAllAssetsByObjectType(
+    schemaName: string,
+    objectTypeName: string,
+    limit: number = 1000,
+  ): Promise<JiraAssetObjectResponse[]> {
+    const allAssets: JiraAssetObjectResponse[] = [];
+    let start = 0;
+    const pageSize = 100; // Taille de page recommandée pour l'API
+
+    try {
+      this.logger.log(`🔍 Récupération des objets de type "${objectTypeName}" du schéma "${schemaName}"...`);
+
+      // Construire l'URL en utilisant JIRA_BASE_URL_ASSETS et JIRA_BASE_PATH_ASSETS si disponible
+      const searchUrl = this.buildAssetsUrl('object/aql');
+
+      while (true) {
+        // Requête AQL pour filtrer par schéma ET type d'objet
+        const aqlBody = {
+          qlQuery: `objectSchema = "${schemaName}" AND objectType = "${objectTypeName}"`,
+          start,
+          limit: pageSize,
+        };
+        
+        const response = await firstValueFrom(
+          this.httpService.post<{ values: JiraAssetObjectResponse[]; size: number; start: number; limit: number }>(
+            searchUrl,
+            aqlBody,
+            {
+              headers: {
+                Authorization: `Basic ${Buffer.from(`${this.emailAssets}:${this.apiTokenAssets.replace(/^["']|["']$/g, '')}`).toString('base64')}`,
+                Accept: 'application/json',
+                'Content-Type': 'application/json',
+              },
+            },
+          ),
+        );
+
+        const assets = response.data.values || [];
+        const totalSize = response.data.size || 0; // Nombre total d'objets disponibles
+        allAssets.push(...assets);
+
+        const pageNum = Math.floor(start / pageSize) + 1;
+        this.logger.log(`📦 Page ${pageNum}: ${assets.length} objets récupérés (total: ${allAssets.length}${totalSize > 0 ? `/${totalSize}` : ''})`);
+
+        // Vérifier s'il y a plus de résultats
+        // Si on reçoit 0 objets, on a fini
+        // Si totalSize est disponible et qu'on l'a atteint, on a fini
+        // Sinon, continuer tant qu'on reçoit des objets et qu'on n'a pas atteint la limite
+        const hasMore = assets.length > 0 && 
+          (totalSize === 0 || allAssets.length < totalSize) && 
+          allAssets.length < limit;
+
+        if (!hasMore) {
+          if (assets.length === 0) {
+            this.logger.log(`✅ Pagination terminée: aucune donnée supplémentaire disponible`);
+          } else if (totalSize > 0 && allAssets.length >= totalSize) {
+            this.logger.log(`✅ Pagination terminée: tous les objets récupérés (${allAssets.length}/${totalSize})`);
+          } else if (allAssets.length >= limit) {
+            this.logger.log(`✅ Pagination terminée: limite atteinte (${allAssets.length}/${limit})`);
+          }
+          break;
+        }
+
+        // Continuer avec la pagination
+        start += assets.length; // Utiliser le nombre réel d'objets reçus plutôt que pageSize
+      }
+
+      this.logger.log(`✅ ${allAssets.length} objets de type "${objectTypeName}" récupérés du schéma "${schemaName}"`);
+      return allAssets.slice(0, limit); // Limiter au nombre demandé
+    } catch (error: any) {
+      this.logger.error(`❌ Erreur lors de la récupération des objets de type "${objectTypeName}" du schéma "${schemaName}": ${error.message}`);
+      if (error.response) {
+        this.logger.error(`Détails: ${JSON.stringify(error.response.data)}`);
+      }
+      throw new BadRequestException(`Impossible de récupérer les objets de type "${objectTypeName}" du schéma "${schemaName}": ${error.message}`);
+    }
+  }
+
+  /**
+   * Détecter automatiquement les IDs d'attributs depuis un objet Jira Asset
+   * Cherche les attributs par leurs valeurs ou labels communs
+   */
+  private detectAttributeIds(jiraAsset: JiraAssetObjectResponse): {
+    serialNumberAttrId?: string;
+    brandAttrId?: string;
+    modelAttrId?: string;
+    typeAttrId?: string;
+    statusAttrId?: string;
+    internalIdAttrId?: string;
+    assignedUserAttrId?: string;
+  } {
+    const mapping: any = {};
+
+    // Parcourir tous les attributs pour détecter les types
+    for (const attr of jiraAsset.attributes || []) {
+      const value = attr.objectAttributeValues?.[0] as any;
+      if (!value) continue;
+
+      // Détecter le numéro de série (généralement un code alphanumérique)
+      if (!mapping.serialNumberAttrId && value.value && typeof value.value === 'string') {
+        const serialPattern = /^[A-Z0-9]{4,20}$/i;
+        if (serialPattern.test(value.value) && value.value.length >= 4) {
+          mapping.serialNumberAttrId = attr.objectTypeAttributeId;
+          continue;
+        }
+      }
+
+      // Détecter la marque (référence à un objet "Constructeurs" ou valeur simple)
+      if (!mapping.brandAttrId && value.referencedType && value.referencedObject) {
+        const refType = value.referencedObject.objectType?.name?.toLowerCase();
+        if (refType?.includes('constructeur') || refType?.includes('brand') || refType?.includes('manufacturer')) {
+          mapping.brandAttrId = attr.objectTypeAttributeId;
+          continue;
+        }
+      }
+
+      // Détecter le modèle (généralement une chaîne de texte)
+      if (!mapping.modelAttrId && value.value && typeof value.value === 'string' && value.value.length > 2) {
+        const modelPattern = /^(Precision|Latitude|ThinkPad|MacBook|Surface|EliteBook|ProBook)/i;
+        if (modelPattern.test(value.value)) {
+          mapping.modelAttrId = attr.objectTypeAttributeId;
+          continue;
+        }
+      }
+
+      // Détecter le statut (objet avec status.category)
+      if (!mapping.statusAttrId && value.status) {
+        mapping.statusAttrId = attr.objectTypeAttributeId;
+        continue;
+      }
+
+      // Détecter l'ID interne (format PI-XXXX)
+      if (!mapping.internalIdAttrId && value.value && typeof value.value === 'string') {
+        if (/^PI-\d+$/i.test(value.value)) {
+          mapping.internalIdAttrId = attr.objectTypeAttributeId;
+          continue;
+        }
+      }
+
+      // Détecter l'utilisateur affecté (référence à un objet utilisateur)
+      if (!mapping.assignedUserAttrId && value.referencedType && value.referencedObject) {
+        const refType = value.referencedObject.objectType?.name?.toLowerCase();
+        if (refType?.includes('user') || refType?.includes('utilisateur') || refType?.includes('employee')) {
+          mapping.assignedUserAttrId = attr.objectTypeAttributeId;
+          continue;
+        }
+      }
+    }
+
+    return mapping;
+  }
+
+  /**
+   * Synchroniser automatiquement tous les Laptops depuis Jira vers MongoDB
+   * Détecte automatiquement les attributs et synchronise efficacement
+   */
+  async syncLaptopsFromJira(
+    schemaName: string = 'Parc Informatique',
+    objectTypeName: string = 'Laptop',
+    options: {
+      limit?: number;
+      autoDetectAttributes?: boolean;
+      attributeMapping?: {
+        serialNumberAttrId?: string;
+        brandAttrId?: string;
+        modelAttrId?: string;
+        typeAttrId?: string;
+        statusAttrId?: string;
+        internalIdAttrId?: string;
+        assignedUserAttrId?: string;
+      };
+    } = {},
+  ): Promise<{
+    created: number;
+    updated: number;
+    skipped: number;
+    errors: number;
+    total: number;
+    attributeMapping: any;
+  }> {
+    const { limit = 1000, autoDetectAttributes = true, attributeMapping: providedMapping } = options;
+    const results = {
+      created: 0,
+      updated: 0,
+      skipped: 0,
+      errors: 0,
+      total: 0,
+      attributeMapping: {} as any,
+    };
+
+    try {
+      this.logger.log(`🔄 Début de la synchronisation des ${objectTypeName} depuis Jira...`);
+
+      // Récupérer tous les Laptops depuis Jira
+      const jiraAssets = await this.getAllAssetsByObjectType(schemaName, objectTypeName, limit);
+      results.total = jiraAssets.length;
+
+      this.logger.log(`📦 ${jiraAssets.length} ${objectTypeName} trouvés dans Jira`);
+
+      if (jiraAssets.length === 0) {
+        this.logger.warn(`⚠️ Aucun ${objectTypeName} trouvé dans Jira`);
+        return results;
+      }
+
+      // Détecter automatiquement les attributs depuis le premier objet si nécessaire
+      let attributeMapping = providedMapping;
+      if (autoDetectAttributes && !providedMapping) {
+        this.logger.log(`🔍 Détection automatique des attributs depuis le premier objet...`);
+        attributeMapping = this.detectAttributeIds(jiraAssets[0]);
+        results.attributeMapping = attributeMapping;
+        this.logger.log(`✅ Attributs détectés: ${JSON.stringify(attributeMapping)}`);
+      } else if (providedMapping) {
+        attributeMapping = providedMapping;
+        results.attributeMapping = providedMapping;
+      }
+
+      // Vérifier que le numéro de série est détecté (requis)
+      if (!attributeMapping?.serialNumberAttrId) {
+        this.logger.warn(`⚠️ Numéro de série non détecté. Tentative de synchronisation avec les attributs disponibles...`);
+      }
+
+      // Synchroniser chaque Laptop par lots pour améliorer les performances
+      const batchSize = 50;
+      for (let i = 0; i < jiraAssets.length; i += batchSize) {
+        const batch = jiraAssets.slice(i, i + batchSize);
+        const batchPromises = batch.map(async (jiraAsset) => {
+          try {
+            // Extraire le numéro de série pour vérification
+            const serialNumberAttr = jiraAsset.attributes.find(
+              a => a.objectTypeAttributeId === attributeMapping?.serialNumberAttrId
+            );
+            const serialNumber = serialNumberAttr?.objectAttributeValues?.[0]?.value?.toString();
+
+            if (!serialNumber || serialNumber.trim() === '') {
+              results.skipped++;
+              this.logger.debug(`⚠️ Asset ${jiraAsset.id} ignoré: numéro de série manquant`);
+              return;
+            }
+
+            // Vérifier si l'équipement existe déjà
+            const existingBefore = await this.equipmentModel.findOne({
+              $or: [
+                { jiraAssetId: jiraAsset.id },
+                { serialNumber: serialNumber.trim() },
+              ],
+            }).exec();
+
+            // Synchroniser l'équipement
+            // Pour les Laptops, forcer le type à PC_portable
+            await this.syncEquipmentFromJira(jiraAsset.id, jiraAsset.objectTypeId, {
+              serialNumberAttrId: attributeMapping?.serialNumberAttrId,
+              brandAttrId: attributeMapping?.brandAttrId,
+              modelAttrId: attributeMapping?.modelAttrId,
+              typeAttrId: attributeMapping?.typeAttrId,
+              statusAttrId: attributeMapping?.statusAttrId,
+              internalIdAttrId: attributeMapping?.internalIdAttrId,
+              assignedUserAttrId: attributeMapping?.assignedUserAttrId,
+              forcedType: 'PC_portable', // Forcer le type pour les Laptops
+            });
+
+            if (existingBefore) {
+              results.updated++;
+            } else {
+              results.created++;
+            }
+          } catch (error: any) {
+            results.errors++;
+            this.logger.error(`❌ Erreur lors de la synchronisation de l'asset ${jiraAsset.id}: ${error.message}`);
+          }
+        });
+
+        await Promise.all(batchPromises);
+        this.logger.log(`📊 Progression: ${Math.min(i + batchSize, jiraAssets.length)}/${jiraAssets.length} traités`);
+      }
+
+      this.logger.log(`✅ Synchronisation terminée: ${results.created} créés, ${results.updated} mis à jour, ${results.skipped} ignorés, ${results.errors} erreurs`);
+      return results;
+    } catch (error: any) {
+      this.logger.error(`❌ Erreur lors de la synchronisation complète: ${error.message}`);
+      throw error;
     }
   }
 
@@ -429,6 +719,7 @@ export class JiraAssetService {
       statusAttrId?: string;
       internalIdAttrId?: string;
       assignedUserAttrId?: string; // ID de l'attribut utilisateur affecté dans Jira
+      forcedType?: EquipmentType; // Type forcé (pour les Laptops, etc.)
     },
   ): Promise<EquipmentDocument> {
     const jiraAsset = await this.getAssetFromJira(jiraAssetId);
@@ -460,11 +751,14 @@ export class JiraAssetService {
       ],
     }).exec();
 
+    // Utiliser le type forcé si fourni, sinon celui détecté depuis Jira, sinon 'autre'
+    const equipmentType = attributeMapping.forcedType || type || EquipmentType.AUTRE;
+    
     const equipmentData: any = {
       serialNumber,
       brand: brand || 'Inconnu',
       model: model || 'Inconnu',
-      type: type || 'autre',
+      type: equipmentType,
       jiraAssetId,
       status: this.mapJiraStatusToEquipmentStatus(status) || EquipmentStatus.DISPONIBLE,
     };

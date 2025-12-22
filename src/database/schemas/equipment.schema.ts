@@ -22,7 +22,7 @@ export enum EquipmentStatus {
   DETRUIT = 'detruit',
 }
 
-@Schema({ timestamps: true })
+@Schema({ timestamps: true, collection: 'equipment' })
 export class Equipment {
   @Prop({ unique: true, sparse: true })
   jiraAssetId?: string; // ID de l'asset dans Jira

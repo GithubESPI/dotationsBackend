@@ -22,7 +22,12 @@
     "test:connection": "node scripts/test-connection.js",
     "test:quick": "node scripts/quick-test-connection.js",
     "check:config": "node scripts/check-config.js",
-    "verify:startup": "node scripts/verify-startup.js"
+    "verify:startup": "node scripts/verify-startup.js",
+    "test:jira-assets": "node scripts/test-jira-assets.js",
+    "test:jira-object-type": "node scripts/test-jira-object-type.js",
+    "test:api-object-type": "node scripts/test-api-object-type.js",
+    "sync:laptops": "node scripts/sync-laptops-direct.js",
+    "sync:laptops:api": "node scripts/sync-laptops-from-jira.js"
   },
   "dependencies": {
     "@microsoft/microsoft-graph-client": "^3.0.7",

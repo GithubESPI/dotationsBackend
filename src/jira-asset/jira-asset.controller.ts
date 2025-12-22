@@ -202,6 +202,81 @@ export class JiraAssetController {
     };
   }
 
+  @Get('schema/:schemaName/object-type/:objectTypeName')
+  @ApiOperation({ 
+    summary: 'Récupérer tous les objets d\'un type d\'objet spécifique dans un schéma',
+    description: 'Récupère tous les objets et attributs d\'un catalogue spécifique (ex: "Laptop") dans un schéma (ex: "Parc Informatique")',
+  })
+  @ApiParam({ name: 'schemaName', description: 'Nom du schéma (ex: "Parc Informatique")' })
+  @ApiParam({ name: 'objectTypeName', description: 'Nom du type d\'objet/catalogue (ex: "Laptop")' })
+  @ApiResponse({
+    status: 200,
+    description: 'Objets récupérés avec succès',
+  })
+  @ApiResponse({ status: 400, description: 'Erreur lors de la récupération' })
+  async getAllAssetsByObjectType(
+    @Param('schemaName') schemaName: string,
+    @Param('objectTypeName') objectTypeName: string,
+  ) {
+    const assets = await this.jiraAssetService.getAllAssetsByObjectType(schemaName, objectTypeName);
+    return {
+      schemaName,
+      objectTypeName,
+      count: assets.length,
+      assets,
+    };
+  }
+
+  @Post('sync/laptops')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ 
+    summary: 'Synchroniser automatiquement tous les Laptops depuis Jira vers MongoDB',
+    description: 'Récupère tous les Laptops depuis Jira Asset, détecte automatiquement les attributs, et les synchronise vers MongoDB pour permettre l\'attribution aux employés. Méthode optimisée avec traitement par lots.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Synchronisation terminée',
+    schema: {
+      type: 'object',
+      properties: {
+        created: { type: 'number' },
+        updated: { type: 'number' },
+        skipped: { type: 'number' },
+        errors: { type: 'number' },
+        total: { type: 'number' },
+        attributeMapping: { type: 'object' },
+      },
+    },
+  })
+  @ApiResponse({ status: 400, description: 'Erreur de synchronisation' })
+  async syncLaptops(
+    @Body() body?: {
+      schemaName?: string;
+      objectTypeName?: string;
+      limit?: number;
+      autoDetectAttributes?: boolean;
+      attributeMapping?: {
+        serialNumberAttrId?: string;
+        brandAttrId?: string;
+        modelAttrId?: string;
+        typeAttrId?: string;
+        statusAttrId?: string;
+        internalIdAttrId?: string;
+        assignedUserAttrId?: string;
+      };
+    },
+  ) {
+    return this.jiraAssetService.syncLaptopsFromJira(
+      body?.schemaName || 'Parc Informatique',
+      body?.objectTypeName || 'Laptop',
+      {
+        limit: body?.limit || 1000,
+        autoDetectAttributes: body?.autoDetectAttributes !== false,
+        attributeMapping: body?.attributeMapping,
+      },
+    );
+  }
+
   @Post('sync/schema/:schemaName')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ 
