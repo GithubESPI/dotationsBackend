@@ -5,6 +5,14 @@ import { Model, Types } from 'mongoose';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import { Equipment, EquipmentDocument, EquipmentStatus, EquipmentType } from '../database/schemas/equipment.schema';
+import {
+  JIRA_EQUIPMENT_TYPE_MAPPING,
+  REFERENCE_OBJECT_TYPES,
+  isEquipmentType,
+  isReferenceType,
+  getEquipmentType,
+  getAllEquipmentTypeNames
+} from './equipment-type-mapping';
 
 interface JiraAssetWorkspace {
   workspaceId: string;
@@ -496,7 +504,9 @@ export class JiraAssetService {
             }).exec();
 
             // Synchroniser l'équipement
-            // Pour les Laptops, forcer le type à PC_portable
+            // Déterminer le type d'équipement à forcer selon le mapping
+            const forcedType = getEquipmentType(objectTypeName) || EquipmentType.PC_PORTABLE;
+
             await this.syncEquipmentFromJira(jiraAsset.id, jiraAsset.objectTypeId, {
               serialNumberAttrId: attributeMapping?.serialNumberAttrId,
               brandAttrId: attributeMapping?.brandAttrId,
@@ -505,7 +515,7 @@ export class JiraAssetService {
               statusAttrId: attributeMapping?.statusAttrId,
               internalIdAttrId: attributeMapping?.internalIdAttrId,
               assignedUserAttrId: attributeMapping?.assignedUserAttrId,
-              forcedType: EquipmentType.PC_PORTABLE, // Forcer le type pour les Laptops
+              forcedType, // Utiliser le type depuis le mapping
             });
 
             if (existingBefore) {
@@ -527,6 +537,147 @@ export class JiraAssetService {
       return results;
     } catch (error: any) {
       this.logger.error(`❌ Erreur lors de la synchronisation complète: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Synchroniser tous les types d'équipements depuis Jira vers MongoDB
+   * Cette méthode récupère automatiquement tous les types d'équipements configurés
+   * (Laptop, Ecrans, Mobiles, Tablettes, etc.) et exclut les types de référence
+   * (Localisation, Constructeurs, Users, etc.)
+   */
+  async syncAllEquipmentTypes(
+    schemaName: string = 'Parc Informatique',
+    options: {
+      limit?: number;
+      autoDetectAttributes?: boolean;
+    } = {},
+  ): Promise<{
+    totalEquipmentTypes: number;
+    results: Array<{
+      objectTypeName: string;
+      equipmentType: EquipmentType;
+      created: number;
+      updated: number;
+      skipped: number;
+      errors: number;
+      total: number;
+    }>;
+    summary: {
+      totalCreated: number;
+      totalUpdated: number;
+      totalSkipped: number;
+      totalErrors: number;
+      totalProcessed: number;
+    };
+  }> {
+    const { limit = 10000, autoDetectAttributes = true } = options;
+
+    this.logger.log(`🚀 Début de la synchronisation de tous les types d'équipements depuis le schéma "${schemaName}"...`);
+
+    const results: Array<{
+      objectTypeName: string;
+      equipmentType: EquipmentType;
+      created: number;
+      updated: number;
+      skipped: number;
+      errors: number;
+      total: number;
+    }> = [];
+
+    const summary = {
+      totalCreated: 0,
+      totalUpdated: 0,
+      totalSkipped: 0,
+      totalErrors: 0,
+      totalProcessed: 0,
+    };
+
+    try {
+      // Récupérer tous les noms d'objectTypes configurés comme équipements
+      const equipmentTypeNames = getAllEquipmentTypeNames();
+
+      this.logger.log(`📋 Types d'équipements à synchroniser: ${equipmentTypeNames.join(', ')}`);
+      this.logger.log(`🚫 Types de référence exclus: ${REFERENCE_OBJECT_TYPES.join(', ')}`);
+
+      // Synchroniser chaque type d'équipement
+      for (const objectTypeName of equipmentTypeNames) {
+        const equipmentType = getEquipmentType(objectTypeName);
+
+        if (!equipmentType) {
+          this.logger.warn(`⚠️ Type d'équipement non trouvé pour "${objectTypeName}", ignoré`);
+          continue;
+        }
+
+        try {
+          this.logger.log(`\n${'='.repeat(60)}`);
+          this.logger.log(`🔄 Synchronisation de "${objectTypeName}" → ${equipmentType}`);
+          this.logger.log(`${'='.repeat(60)}\n`);
+
+          // Utiliser la méthode existante syncLaptopsFromJira qui est générique
+          const syncResult = await this.syncLaptopsFromJira(
+            schemaName,
+            objectTypeName,
+            {
+              limit,
+              autoDetectAttributes,
+            },
+          );
+
+          // Ajouter les résultats
+          results.push({
+            objectTypeName,
+            equipmentType,
+            created: syncResult.created,
+            updated: syncResult.updated,
+            skipped: syncResult.skipped,
+            errors: syncResult.errors,
+            total: syncResult.total,
+          });
+
+          // Mettre à jour le résumé
+          summary.totalCreated += syncResult.created;
+          summary.totalUpdated += syncResult.updated;
+          summary.totalSkipped += syncResult.skipped;
+          summary.totalErrors += syncResult.errors;
+          summary.totalProcessed += syncResult.total;
+
+          this.logger.log(`✅ "${objectTypeName}": ${syncResult.created} créés, ${syncResult.updated} mis à jour, ${syncResult.skipped} ignorés, ${syncResult.errors} erreurs`);
+        } catch (error: any) {
+          this.logger.error(`❌ Erreur lors de la synchronisation de "${objectTypeName}": ${error.message}`);
+          results.push({
+            objectTypeName,
+            equipmentType,
+            created: 0,
+            updated: 0,
+            skipped: 0,
+            errors: 1,
+            total: 0,
+          });
+          summary.totalErrors++;
+        }
+      }
+
+      this.logger.log(`\n${'='.repeat(60)}`);
+      this.logger.log(`✅ SYNCHRONISATION COMPLÈTE TERMINÉE`);
+      this.logger.log(`${'='.repeat(60)}`);
+      this.logger.log(`📊 Résumé global:`);
+      this.logger.log(`   - Types d'équipements traités: ${results.length}`);
+      this.logger.log(`   - Total d'objets traités: ${summary.totalProcessed}`);
+      this.logger.log(`   - Créés: ${summary.totalCreated}`);
+      this.logger.log(`   - Mis à jour: ${summary.totalUpdated}`);
+      this.logger.log(`   - Ignorés: ${summary.totalSkipped}`);
+      this.logger.log(`   - Erreurs: ${summary.totalErrors}`);
+      this.logger.log(`${'='.repeat(60)}\n`);
+
+      return {
+        totalEquipmentTypes: results.length,
+        results,
+        summary,
+      };
+    } catch (error: any) {
+      this.logger.error(`❌ Erreur fatale lors de la synchronisation de tous les équipements: ${error.message}`);
       throw error;
     }
   }

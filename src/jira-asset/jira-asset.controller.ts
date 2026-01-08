@@ -25,10 +25,10 @@ import { UpdateEquipmentStatusInJiraDto } from './dto/update-status-jira.dto';
 @UseGuards(JwtAuthGuard)
 @ApiBearerAuth('JWT-auth')
 export class JiraAssetController {
-  constructor(private readonly jiraAssetService: JiraAssetService) {}
+  constructor(private readonly jiraAssetService: JiraAssetService) { }
 
   @Get('workspace')
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Obtenir l\'ID du workspace Jira Asset',
     description: 'Récupère l\'ID du workspace Jira Asset configuré',
   })
@@ -43,7 +43,7 @@ export class JiraAssetController {
 
   @Post('sync/from-jira')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Synchroniser un équipement depuis Jira vers MongoDB',
     description: 'Récupère un équipement depuis Jira Asset et le synchronise dans MongoDB',
   })
@@ -70,7 +70,7 @@ export class JiraAssetController {
 
   @Post('sync/to-jira')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Synchroniser un équipement depuis MongoDB vers Jira',
     description: 'Envoie un équipement depuis MongoDB vers Jira Asset (création ou mise à jour)',
   })
@@ -97,7 +97,7 @@ export class JiraAssetController {
 
   @Post('sync/all-from-jira')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Synchroniser tous les équipements depuis Jira',
     description: 'Synchronise tous les équipements d\'un type d\'objet depuis Jira Asset vers MongoDB',
   })
@@ -126,7 +126,7 @@ export class JiraAssetController {
   }
 
   @Get('asset/:assetId')
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Récupérer un asset depuis Jira',
     description: 'Récupère les détails d\'un asset depuis Jira Asset par son ID',
   })
@@ -142,7 +142,7 @@ export class JiraAssetController {
 
   @Post('search')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Rechercher des assets dans Jira',
     description: 'Recherche des assets dans Jira Asset selon un type d\'objet et une requête optionnelle',
   })
@@ -162,7 +162,7 @@ export class JiraAssetController {
 
   @Post('equipment/:equipmentId/update-status')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Mettre à jour uniquement le statut et l\'utilisateur dans Jira',
     description: 'Méthode optimisée pour mettre à jour uniquement le statut et l\'utilisateur affecté dans Jira après une affectation/libération',
   })
@@ -184,7 +184,7 @@ export class JiraAssetController {
   }
 
   @Get('schema/:schemaName')
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Récupérer tous les objets d\'un schéma',
     description: 'Récupère tous les objets d\'un schéma spécifique (ex: "Parc Informatique") via l\'API AQL',
   })
@@ -203,7 +203,7 @@ export class JiraAssetController {
   }
 
   @Get('schema/:schemaName/object-type/:objectTypeName')
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Récupérer tous les objets d\'un type d\'objet spécifique dans un schéma',
     description: 'Récupère tous les objets et attributs d\'un catalogue spécifique (ex: "Laptop") dans un schéma (ex: "Parc Informatique")',
   })
@@ -229,7 +229,7 @@ export class JiraAssetController {
 
   @Post('sync/laptops')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Synchroniser automatiquement tous les Laptops depuis Jira vers MongoDB',
     description: 'Récupère tous les Laptops depuis Jira Asset, détecte automatiquement les attributs, et les synchronise vers MongoDB pour permettre l\'attribution aux employés. Méthode optimisée avec traitement par lots.',
   })
@@ -277,9 +277,67 @@ export class JiraAssetController {
     );
   }
 
+  @Post('sync/all-equipment-types')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Synchroniser tous les types d\'équipements depuis Jira',
+    description: 'Récupère et synchronise automatiquement tous les types d\'équipements (Laptop, Ecrans, Mobiles, Tablettes, etc.) depuis Jira Assets vers MongoDB. Exclut automatiquement les types de référence (Localisation, Constructeurs, Users, etc.). Cette méthode détecte automatiquement les attributs pour chaque type d\'équipement.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Synchronisation terminée',
+    schema: {
+      type: 'object',
+      properties: {
+        totalEquipmentTypes: { type: 'number' },
+        results: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              objectTypeName: { type: 'string' },
+              equipmentType: { type: 'string' },
+              created: { type: 'number' },
+              updated: { type: 'number' },
+              skipped: { type: 'number' },
+              errors: { type: 'number' },
+              total: { type: 'number' },
+            },
+          },
+        },
+        summary: {
+          type: 'object',
+          properties: {
+            totalCreated: { type: 'number' },
+            totalUpdated: { type: 'number' },
+            totalSkipped: { type: 'number' },
+            totalErrors: { type: 'number' },
+            totalProcessed: { type: 'number' },
+          },
+        },
+      },
+    },
+  })
+  @ApiResponse({ status: 400, description: 'Erreur de synchronisation' })
+  async syncAllEquipmentTypes(
+    @Body() body?: {
+      schemaName?: string;
+      limit?: number;
+      autoDetectAttributes?: boolean;
+    },
+  ) {
+    return this.jiraAssetService.syncAllEquipmentTypes(
+      body?.schemaName || 'Parc Informatique',
+      {
+        limit: body?.limit || 10000,
+        autoDetectAttributes: body?.autoDetectAttributes !== false,
+      },
+    );
+  }
+
   @Post('sync/schema/:schemaName')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Synchroniser tous les équipements d\'un schéma depuis Jira',
     description: 'Récupère tous les objets du schéma "Parc Informatique" et les synchronise automatiquement vers MongoDB',
   })
