@@ -152,10 +152,10 @@ export class AllocationsService {
       );
     }
 
-    // Vérifier que tous les matériels sont disponibles
-    // CORRECTIF: Si le statut est DISPONIBLE, on considère que c'est bon, même s'il reste un currentUserId (donnée fantôme)
+    // CORRECTIF: Si le statut est DISPONIBLE ou EN_REPARATION, on considère que c'est bon
+    // Cela permet de réaffecter un équipement qui revient de réparation
     const unavailableEquipments = equipments.filter(
-      eq => eq.status !== EquipmentStatus.DISPONIBLE
+      eq => eq.status !== EquipmentStatus.DISPONIBLE && eq.status !== EquipmentStatus.EN_REPARATION
     );
 
     if (unavailableEquipments.length > 0) {

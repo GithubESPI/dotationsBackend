@@ -35,6 +35,10 @@ export interface JiraAssetObjectResponse {
   id: string;
   objectKey: string;
   objectTypeId: string;
+  objectType: {
+    id: string;
+    name: string;
+  };
   attributes: Array<{
     objectTypeAttributeId: string;
     objectAttributeValues: Array<{
@@ -101,6 +105,78 @@ export class JiraAssetService {
       Accept: 'application/json',
       'Content-Type': 'application/json',
     };
+  }
+
+  /**
+   * Rechercher un utilisateur Jira par email pour obtenir son accountId
+   */
+  async findJiraUserByEmail(email: string): Promise<string | null> {
+    try {
+      // Utiliser l'API Jira standard (pas Assets) pour rechercher l'utilisateur
+      const searchUrl = `${this.baseUrl}/rest/api/3/user/search`;
+
+      const response = await firstValueFrom(
+        this.httpService.get(searchUrl, {
+          params: { query: email },
+          headers: {
+            Authorization: `Basic ${Buffer.from(`${this.email}:${this.apiToken.replace(/^["']|["']$/g, '')}`).toString('base64')}`,
+            Accept: 'application/json'
+          }
+        })
+      );
+
+      if (response.data && response.data.length > 0) {
+        // On prend le premier utilisateur actif trouvé
+        const user = response.data.find((u: any) => u.accountType === 'atlassian' && u.active);
+        return user ? user.accountId : response.data[0].accountId;
+      }
+
+      return null;
+    } catch (error: any) {
+      this.logger.warn(`⚠️ Erreur lors de la recherche de l'utilisateur Jira ${email}: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Créer un utilisateur Jira (ou inviter)
+   * Note: Cette méthode peut nécessiter des droits d'administration
+   */
+  async createJiraUser(email: string, displayName: string): Promise<string | null> {
+    try {
+      this.logger.log(`👤 Tentative de création de l'utilisateur Jira: ${email}`);
+      const createUrl = `${this.baseUrl}/rest/api/3/user`;
+
+      const response = await firstValueFrom(
+        this.httpService.post(createUrl,
+          {
+            emailAddress: email,
+            displayName: displayName,
+            // products: ['jira-software'] // Optionnel
+          },
+          {
+            headers: {
+              Authorization: `Basic ${Buffer.from(`${this.email}:${this.apiToken.replace(/^["']|["']$/g, '')}`).toString('base64')}`,
+              Accept: 'application/json',
+              'Content-Type': 'application/json'
+            }
+          }
+        )
+      );
+
+      if (response.data && response.data.accountId) {
+        this.logger.log(`✅ Utilisateur Jira créé: ${response.data.accountId}`);
+        return response.data.accountId;
+      }
+
+      return null;
+    } catch (error: any) {
+      this.logger.warn(`⚠️ Impossible de créer l'utilisateur Jira ${email}: ${error.message}`);
+      if (error.response?.data) {
+        this.logger.warn(`Détails: ${JSON.stringify(error.response.data)}`);
+      }
+      return null;
+    }
   }
 
   /**
@@ -393,9 +469,12 @@ export class JiraAssetService {
 
   /**
    * Détecter automatiquement les IDs d'attributs depuis un objet Jira Asset
-   * Cherche les attributs par leurs valeurs ou labels communs
+   * Cherche les attributs par leurs noms (via map) ou valeurs/labels communs
    */
-  private detectAttributeIds(jiraAsset: JiraAssetObjectResponse): {
+  private detectAttributeIds(
+    jiraAsset: JiraAssetObjectResponse,
+    attributesDefinitionMap?: Record<string, string>
+  ): {
     serialNumberAttrId?: string;
     brandAttrId?: string;
     modelAttrId?: string;
@@ -406,7 +485,39 @@ export class JiraAssetService {
   } {
     const mapping: any = {};
 
-    // Parcourir tous les attributs pour détecter les types
+    // 1. Priorité: Utiliser la map des définitions si disponible (plus fiable)
+    if (attributesDefinitionMap) {
+      for (const [id, name] of Object.entries(attributesDefinitionMap)) {
+        const lowerName = name.toLowerCase();
+
+        // Brand / Constructeur
+        if (!mapping.brandAttrId && (lowerName.includes('constructeur') || lowerName.includes('brand') || lowerName.includes('manufacturer'))) {
+          mapping.brandAttrId = id;
+        }
+        // Model
+        if (!mapping.modelAttrId && (lowerName === 'model' || lowerName === 'modèle' || lowerName.includes('modele'))) {
+          mapping.modelAttrId = id;
+        }
+        // Serial Number
+        if (!mapping.serialNumberAttrId && (lowerName === 'serial number' || lowerName === 'serial' || lowerName === 'n/s' || lowerName === 'numéro de série')) {
+          mapping.serialNumberAttrId = id;
+        }
+        // Status
+        if (!mapping.statusAttrId && (lowerName === 'status' || lowerName === 'statut' || lowerName === 'état' || lowerName === 'etat')) {
+          mapping.statusAttrId = id;
+        }
+        // Assigned User
+        if (!mapping.assignedUserAttrId && (lowerName === 'user' || lowerName === 'users' || lowerName === 'utilisateur' || lowerName === 'utilisateurs' || lowerName === 'owner')) {
+          mapping.assignedUserAttrId = id;
+        }
+        // Internal ID
+        if (!mapping.internalIdAttrId && (lowerName === 'internal id' || lowerName === 'id interne' || lowerName === 'key')) {
+          mapping.internalIdAttrId = id;
+        }
+      }
+    }
+
+    // 2. Fallback: Parcourir tous les attributs pour détecter les types par valeur
     for (const attr of jiraAsset.attributes || []) {
       const value = attr.objectAttributeValues?.[0] as any;
       if (!value) continue;
@@ -625,7 +736,7 @@ export class JiraAssetService {
       let attributeMapping = providedMapping;
       if (autoDetectAttributes && !providedMapping) {
         this.logger.log(`🔍 Détection automatique des attributs depuis le premier objet...`);
-        attributeMapping = this.detectAttributeIds(jiraAssets[0]);
+        attributeMapping = this.detectAttributeIds(jiraAssets[0], attributesDefinitionMap);
         results.attributeMapping = attributeMapping;
         this.logger.log(`✅ Attributs détectés: ${JSON.stringify(attributeMapping)}`);
       } else if (providedMapping) {
@@ -1089,7 +1200,17 @@ export class JiraAssetService {
     const getAttributeValue = (attributeId?: string): string | undefined => {
       if (!attributeId) return undefined;
       const attr = jiraAsset.attributes.find(a => a.objectTypeAttributeId === attributeId);
-      return attr?.objectAttributeValues[0]?.value?.toString();
+      if (!attr) return undefined;
+
+      const val = attr.objectAttributeValues[0] as any;
+      if (!val) return undefined;
+
+      // Gérer le cas où la valeur est un objet Status (nom dans .status.name)
+      if (val.status && val.status.name) {
+        return val.status.name;
+      }
+
+      return val.value?.toString();
     };
 
     // --- CONSTRUCTION DE LA MAP COMPLÈTE DES ATTRIBUTS JIRA ---
@@ -1246,10 +1367,19 @@ export class JiraAssetService {
       if (user && user.email) {
         // Pour Jira, on peut utiliser l'email ou l'Atlassian Account ID
         // Si vous avez l'Atlassian Account ID, utilisez-le, sinon utilisez l'email
-        attributes.push({
-          objectTypeAttributeId: attributeMapping.assignedUserAttrId,
-          objectAttributeValues: [{ value: user.email }], // Ou user.atlassianAccountId si disponible
-        });
+        const accountId = await this.findJiraUserByEmail(user.email);
+        if (accountId) {
+          attributes.push({
+            objectTypeAttributeId: attributeMapping.assignedUserAttrId,
+            objectAttributeValues: [{ value: accountId }],
+          });
+        } else {
+          // Fallback to email if account ID not found, though likely to fail if restricted
+          attributes.push({
+            objectTypeAttributeId: attributeMapping.assignedUserAttrId,
+            objectAttributeValues: [{ value: user.email }],
+          });
+        }
       } else {
         // Si pas d'utilisateur affecté, mettre une valeur vide pour libérer
         attributes.push({
@@ -1296,6 +1426,73 @@ export class JiraAssetService {
       return;
     }
 
+    // Auto-détection des attributs si non fournis
+    if (!attributeMapping.statusAttrId || !attributeMapping.assignedUserAttrId) {
+      try {
+        this.logger.debug(`🔍 Auto-détection des IDs d'attributs pour l'asset ${equipment.jiraAssetId}...`);
+
+        // 1. Récupérer l'asset pour connaître son type et ses attributs actuels
+        const asset = await this.getAssetFromJira(equipment.jiraAssetId);
+        const objectTypeName = asset.objectType.name;
+
+        // 2. Récupérer les définitions d'attributs pour ce type (pour la détection par nom)
+        const attributesMap = await this.getObjectTypeAttributes(objectTypeName);
+
+        // 3. Utiliser la méthode de détection existante
+        const detected = this.detectAttributeIds(asset, attributesMap);
+
+        if (!attributeMapping.statusAttrId && detected.statusAttrId) {
+          attributeMapping.statusAttrId = detected.statusAttrId;
+          this.logger.debug(`   ✅ Statut détecté: ID ${detected.statusAttrId}`);
+        }
+
+        if (!attributeMapping.assignedUserAttrId && detected.assignedUserAttrId) {
+          attributeMapping.assignedUserAttrId = detected.assignedUserAttrId;
+          this.logger.debug(`   ✅ Utilisateur détecté: ID ${detected.assignedUserAttrId}`);
+        }
+
+      } catch (error: any) {
+        this.logger.error(`❌ Erreur lors de l'auto-détection des attributs: ${error.message}`);
+      }
+    }
+
+    // Préparer un mapping complet pour le rafraîchissement
+    const fullAttributeMapping: any = { ...attributeMapping };
+
+    // Si on a manqué des attributs nécessaires pour le refresh (comme le serial number), on essaie de les détecter maintenant
+    // On profite pour récupérer aussi la map des définitions d'attributs nécessaire pour syncEquipmentFromJira
+    let attributesDefinitionMap: Record<string, string> | undefined;
+
+    if (!fullAttributeMapping.serialNumberAttrId) {
+      try {
+        // Récupération de l'asset si pas déjà fait
+        const asset = await this.getAssetFromJira(equipment.jiraAssetId);
+        const objectTypeName = asset.objectType.name;
+        attributesDefinitionMap = await this.getObjectTypeAttributes(objectTypeName);
+        const detected = this.detectAttributeIds(asset, attributesDefinitionMap);
+
+        // Fusionner les attributs détectés
+        Object.assign(fullAttributeMapping, detected);
+
+        // S'assurer que le status et user de l'input sont conservés s'ils étaient présents
+        if (attributeMapping.statusAttrId) fullAttributeMapping.statusAttrId = attributeMapping.statusAttrId;
+        if (attributeMapping.assignedUserAttrId) fullAttributeMapping.assignedUserAttrId = attributeMapping.assignedUserAttrId;
+
+        this.logger.debug(`🔍 Attributs complémentaires détectés pour refresh: Serial=${fullAttributeMapping.serialNumberAttrId}`);
+      } catch (e) {
+        this.logger.warn(`⚠️ Impossible de détecter les attributs complémentaires: ${e.message}`);
+      }
+    } else {
+      // Même si on a les IDs, il nous faut les définitions pour le refresh complet (pour avoir les noms des champs)
+      try {
+        const asset = await this.getAssetFromJira(equipment.jiraAssetId);
+        const objectTypeName = asset.objectType.name;
+        attributesDefinitionMap = await this.getObjectTypeAttributes(objectTypeName);
+      } catch (e) {
+        this.logger.warn(`⚠️ Impossible de récupérer les définitions d'attributs pour le refresh: ${e.message}`);
+      }
+    }
+
     const attributes = [
       {
         objectTypeAttributeId: attributeMapping.statusAttrId,
@@ -1303,30 +1500,85 @@ export class JiraAssetService {
       },
     ];
 
+    // Log du payload pour debug
+    this.logger.debug(`📤 Payload mise à jour Jira (Status): ${JSON.stringify(attributes[0])}`);
+
     // Mettre à jour l'utilisateur affecté si l'attribut est configuré
     if (attributeMapping.assignedUserAttrId) {
-      const user = equipment.currentUserId as any;
+      const user = equipment.currentUserId as any; // Cast car populate
       if (user && user.email) {
-        attributes.push({
-          objectTypeAttributeId: attributeMapping.assignedUserAttrId,
-          objectAttributeValues: [{ value: user.email }], // Ou user.atlassianAccountId si disponible
-        });
+        // Rechercher l'utilisateur Jira par email pour obtenir son Account ID
+        let accountId = await this.findJiraUserByEmail(user.email);
+
+        // Si non trouvé, essayer de créer
+        if (!accountId) {
+          accountId = await this.createJiraUser(user.email, user.displayName || user.email.split('@')[0]);
+        }
+
+        if (accountId) {
+          attributes.push({
+            objectTypeAttributeId: attributeMapping.assignedUserAttrId,
+            objectAttributeValues: [{ value: accountId }],
+          });
+          this.logger.debug(`📤 Payload mise à jour Jira (User): Email=${user.email} -> AccountId=${accountId} (AttrID=${attributeMapping.assignedUserAttrId})`);
+        } else {
+          this.logger.warn(`⚠️ Utilisateur ${user.email} non trouvé et impossible à créer dans Jira. L'affectation dans Jira sera ignorée.`);
+        }
       } else {
         // Libérer l'utilisateur dans Jira
         attributes.push({
           objectTypeAttributeId: attributeMapping.assignedUserAttrId,
           objectAttributeValues: [],
         });
+        this.logger.debug(`📤 Payload mise à jour Jira (User): Suppression (AttrID=${attributeMapping.assignedUserAttrId})`);
       }
     }
 
     try {
-      await this.updateAssetInJira(equipment.jiraAssetId, attributes);
+      // Filtrer les attributs dont l'ID est manquant
+      const validAttributes = attributes.filter(a => a.objectTypeAttributeId);
+
+      if (validAttributes.length === 0) {
+        this.logger.warn(`⚠️ Aucun attribut valide à mettre à jour pour l'équipement ${equipment.serialNumber}`);
+        return;
+      }
+
+      await this.updateAssetInJira(equipment.jiraAssetId, validAttributes);
       equipment.lastSyncedAt = new Date();
       await equipment.save();
-      this.logger.log(`✅ Statut Jira mis à jour pour l'équipement ${equipment.serialNumber}`);
+      this.logger.log(`✅ Statut Jira mis à jour pour l'équipement ${equipment.serialNumber} (Status: ${this.mapEquipmentStatusToJira(equipment.status)})`);
+      // 3. Rafraîchir les données locales depuis Jira pour s'assurer que tout est synchro
+      // Cela permet de récupérer les libellés exacts (ex: Statut, Utilisateur) tels qu'ils sont dans Jira
+      try {
+        await this.syncEquipmentFromJira(
+          equipment.jiraAssetId,
+          equipment.jiraAssetId /* hack: ID non utilisé ici */,
+          {
+            serialNumberAttrId: fullAttributeMapping.serialNumberAttrId,
+            brandAttrId: fullAttributeMapping.brandAttrId,
+            modelAttrId: fullAttributeMapping.modelAttrId,
+            typeAttrId: fullAttributeMapping.typeAttrId,
+            statusAttrId: fullAttributeMapping.statusAttrId,
+            internalIdAttrId: fullAttributeMapping.internalIdAttrId,
+            assignedUserAttrId: fullAttributeMapping.assignedUserAttrId
+          },
+          attributesDefinitionMap // Pass the definitions!
+        );
+
+        // Ou plus simplement, mettre à jour juste les attributs
+        /*
+        const updatedAsset = await this.getAssetFromJira(equipment.jiraAssetId);
+        // ... logique de mise à jour des attributs ...
+        */
+      } catch (refreshError) {
+        this.logger.warn(`⚠️ Impossible de rafraîchir l'équipement après mise à jour: ${refreshError}`);
+      }
+
     } catch (error: any) {
       this.logger.error(`❌ Erreur lors de la mise à jour du statut Jira: ${error.message}`);
+      if (error.response?.data) {
+        this.logger.error(`Détails erreur Jira: ${JSON.stringify(error.response.data)}`);
+      }
       // Ne pas faire échouer l'opération si Jira n'est pas disponible
       // L'utilisateur peut toujours affecter/libérer l'équipement dans MongoDB
     }
@@ -1416,10 +1668,13 @@ export class JiraAssetService {
     const statusMap: Record<string, EquipmentStatus> = {
       'disponible': EquipmentStatus.DISPONIBLE,
       'available': EquipmentStatus.DISPONIBLE,
+      'en stock': EquipmentStatus.DISPONIBLE, // Status Jira spécifique
       'affecté': EquipmentStatus.AFFECTE,
+      'affecte': EquipmentStatus.AFFECTE,     // Sans accent
       'assigned': EquipmentStatus.AFFECTE,
       'en_reparation': EquipmentStatus.EN_REPARATION,
       'en_maintenance': EquipmentStatus.EN_REPARATION,
+      'en intervention': EquipmentStatus.EN_REPARATION, // Status Jira spécifique
       'maintenance': EquipmentStatus.EN_REPARATION,
       'repair': EquipmentStatus.EN_REPARATION,
       'restitue': EquipmentStatus.RESTITUE,
@@ -1428,6 +1683,7 @@ export class JiraAssetService {
       'lost': EquipmentStatus.PERDU,
       'detruit': EquipmentStatus.DETRUIT,
       'destroyed': EquipmentStatus.DETRUIT,
+      'rebut': EquipmentStatus.DETRUIT,       // Status Jira spécifique
     };
 
     return statusMap[jiraStatus.toLowerCase()] || EquipmentStatus.DISPONIBLE;
@@ -1438,15 +1694,14 @@ export class JiraAssetService {
    */
   private mapEquipmentStatusToJira(status: EquipmentStatus): string {
     const statusMap: Record<EquipmentStatus, string> = {
-      [EquipmentStatus.DISPONIBLE]: 'disponible',
-      [EquipmentStatus.AFFECTE]: 'affecté',
-      [EquipmentStatus.EN_REPARATION]: 'en_reparation',
-      [EquipmentStatus.RESTITUE]: 'restitue',
-      [EquipmentStatus.PERDU]: 'perdu',
-      [EquipmentStatus.DETRUIT]: 'detruit',
+      [EquipmentStatus.DISPONIBLE]: 'En stock',
+      [EquipmentStatus.AFFECTE]: 'Affecte',
+      [EquipmentStatus.EN_REPARATION]: 'En intervention',
+      [EquipmentStatus.RESTITUE]: 'En stock',
+      [EquipmentStatus.PERDU]: 'Rebut', // Ou un autre état si "PERDU" existe
+      [EquipmentStatus.DETRUIT]: 'Rebut',
     };
 
-    return statusMap[status] || 'disponible';
+    return statusMap[status] || 'En stock';
   }
 }
-
