@@ -59,7 +59,7 @@ export class AllocationsService {
     for (let index = 0; index < createDto.equipments.length; index++) {
       const eq = createDto.equipments[index];
       const eqAny = eq as any;
-      
+
       // Essayer plusieurs sources pour trouver l'ID MongoDB
       let equipmentId: string | null = null;
       let source = '';
@@ -75,24 +75,33 @@ export class AllocationsService {
         equipmentId = eqAny._id.trim();
         source = '_id';
       }
-      // 2. Si pas d'ID direct, chercher par jiraAssetId ou serialNumber
-      else if (eqAny?.jiraAssetId || eqAny?.serialNumber) {
-        const searchCriteria: any = {};
+      // 2. Si pas d'ID direct, chercher par jiraAssetId, serialNumber ou internalId
+      else if (eqAny?.jiraAssetId || eqAny?.serialNumber || eqAny?.internalId) {
+        const orConditions: any[] = [];
+        const sources: string[] = [];
+
         if (eqAny.jiraAssetId) {
-          searchCriteria.jiraAssetId = eqAny.jiraAssetId.toString();
-          source = `jiraAssetId:${eqAny.jiraAssetId}`;
+          orConditions.push({ jiraAssetId: eqAny.jiraAssetId.toString() });
+          sources.push(`jiraAssetId:${eqAny.jiraAssetId}`);
         }
         if (eqAny.serialNumber) {
-          searchCriteria.serialNumber = eqAny.serialNumber.toString().trim();
-          source = `serialNumber:${eqAny.serialNumber}`;
+          orConditions.push({ serialNumber: eqAny.serialNumber.toString().trim() });
+          sources.push(`serialNumber:${eqAny.serialNumber}`);
+        }
+        if (eqAny.internalId) {
+          orConditions.push({ internalId: eqAny.internalId.toString().trim() });
+          sources.push(`internalId:${eqAny.internalId}`);
         }
 
+        source = sources.join(' OR ');
         this.logger.debug(`🔍 Recherche d'équipement par ${source}...`);
-        const foundEquipment = await this.equipmentModel.findOne(searchCriteria).exec();
-        
+
+        // Utiliser findOne avec $or pour trouver si l'un des critères correspond
+        const foundEquipment = await this.equipmentModel.findOne({ $or: orConditions }).exec();
+
         if (foundEquipment) {
           equipmentId = foundEquipment._id.toString();
-          this.logger.debug(`✅ Équipement trouvé: ${equipmentId} via ${source}`);
+          this.logger.debug(`✅ Équipement trouvé: ${equipmentId} (Serial: ${foundEquipment.serialNumber}) via recherche flexible`);
         } else {
           resolutionErrors.push(`Index ${index}: Aucun équipement trouvé avec ${source}`);
           this.logger.warn(`⚠️ Aucun équipement trouvé avec ${source}`);
@@ -127,7 +136,7 @@ export class AllocationsService {
 
     const equipmentIds = equipmentResolutions.map(r => r.equipmentId);
     this.logger.debug(`✅ ${equipmentIds.length} équipement(s) résolu(s): ${equipmentResolutions.map(r => `${r.source}→${r.equipmentId}`).join(', ')}`);
-    
+
     // Récupérer les équipements depuis MongoDB
     const equipments = await this.equipmentModel.find({
       _id: { $in: equipmentIds.map(id => new Types.ObjectId(id)) },
@@ -144,8 +153,9 @@ export class AllocationsService {
     }
 
     // Vérifier que tous les matériels sont disponibles
+    // CORRECTIF: Si le statut est DISPONIBLE, on considère que c'est bon, même s'il reste un currentUserId (donnée fantôme)
     const unavailableEquipments = equipments.filter(
-      eq => eq.status !== EquipmentStatus.DISPONIBLE || (eq.currentUserId !== null && eq.currentUserId !== undefined)
+      eq => eq.status !== EquipmentStatus.DISPONIBLE
     );
 
     if (unavailableEquipments.length > 0) {
@@ -167,7 +177,7 @@ export class AllocationsService {
       const eqDto = createDto.equipments[resolution.originalIndex];
       const equipment = equipments.find(e => e._id.toString() === resolution.equipmentId);
       const eqAny = eqDto as any;
-      
+
       return {
         equipmentId: new Types.ObjectId(resolution.equipmentId),
         internalId: eqAny?.internalId || equipment?.internalId,
@@ -201,7 +211,7 @@ export class AllocationsService {
       equipment.currentUserId = new Types.ObjectId(createDto.userId);
       equipment.status = EquipmentStatus.AFFECTE;
       await equipment.save();
-      
+
       // Mettre à jour Jira automatiquement si l'équipement est synchronisé avec Jira
       if (equipment.jiraAssetId && this.jiraAssetService) {
         try {

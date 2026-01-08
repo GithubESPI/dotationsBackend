@@ -369,5 +369,19 @@ export class JiraAssetController {
       assignedUserAttrId: dto.assignedUserAttrId,
     });
   }
+
+  @Get('object-type/:objectTypeName/attributes')
+  @ApiOperation({
+    summary: 'Récupérer les définitions des attributs d\'un type d\'objet',
+    description: 'Renvoie la liste détaillée des attributs (ID, nom, type) pour un type d\'objet (ex: "Laptop")',
+  })
+  @ApiParam({ name: 'objectTypeName', description: 'Nom du type d\'objet (ex: "Laptop")' })
+  @ApiResponse({
+    status: 200,
+    description: 'Définitions des attributs récupérées avec succès',
+  })
+  async getObjectTypeAttributes(@Param('objectTypeName') objectTypeName: string) {
+    return this.jiraAssetService.getObjectTypeAttributesDetails(objectTypeName);
+  }
 }
 

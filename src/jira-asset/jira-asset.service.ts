@@ -4,6 +4,8 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
+import { map } from 'rxjs/operators';
+
 import { Equipment, EquipmentDocument, EquipmentStatus, EquipmentType } from '../database/schemas/equipment.schema';
 import {
   JIRA_EQUIPMENT_TYPE_MAPPING,
@@ -91,6 +93,17 @@ export class JiraAssetService {
   }
 
   /**
+   * Construire les headers d'authentification pour Jira Assets
+   */
+  private getAuthHeaders(): any {
+    return {
+      Authorization: `Basic ${Buffer.from(`${this.emailAssets}:${this.apiTokenAssets.replace(/^["']|["']$/g, '')}`).toString('base64')}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    };
+  }
+
+  /**
    * Obtenir l'ID du workspace Jira Asset
    */
   async getWorkspaceId(): Promise<string> {
@@ -118,10 +131,7 @@ export class JiraAssetService {
         this.httpService.get<{ values: JiraAssetWorkspace[] }>(
           workspaceUrl,
           {
-            headers: {
-              Authorization: `Basic ${Buffer.from(`${this.emailAssets}:${this.apiTokenAssets.replace(/^["']|["']$/g, '')}`).toString('base64')}`,
-              Accept: 'application/json',
-            },
+            headers: this.getAuthHeaders(),
           },
         ),
       );
@@ -136,6 +146,53 @@ export class JiraAssetService {
     } catch (error: any) {
       this.logger.error(`❌ Erreur lors de la récupération du workspace: ${error.message}`);
       throw new BadRequestException(`Impossible de récupérer le workspace Jira Asset: ${error.message}`);
+    }
+  }
+
+  /**
+   * Récupérer l'ID d'un schéma d'objets par son nom
+   */
+  async getObjectSchemaId(schemaName: string): Promise<string | null> {
+    try {
+      const workspaceId = await this.getWorkspaceId();
+      // Endpoint pour lister les schémas: /objectschema/list
+      const url = this.buildAssetsUrl('objectschema/list');
+
+      const response = await firstValueFrom(
+        this.httpService.get(url, { headers: this.getAuthHeaders() }).pipe(
+          map((res) => res.data),
+        ),
+      );
+
+      if (response && response.values) {
+        const schema = response.values.find((s: any) => s.name === schemaName);
+        return schema ? schema.id : null;
+      }
+      return null;
+    } catch (error: any) {
+      this.logger.warn(`⚠️ Erreur lors de la récupération du schéma ${schemaName}: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Récupérer tous les types d'objets d'un schéma
+   */
+  async getAllObjectTypes(schemaId: string): Promise<any[]> {
+    try {
+      // Endpoint pour lister les types d'objets: /objectschema/{id}/objecttypes
+      const url = this.buildAssetsUrl(`objectschema/${schemaId}/objecttypes`); // Correction de l'endpoint
+
+      const response = await firstValueFrom( // Utilisation correcte de firstValueFrom
+        this.httpService.get(url, { headers: this.getAuthHeaders() }).pipe(
+          map((res) => res.data),
+        ),
+      );
+
+      return response || [];
+    } catch (error: any) {
+      this.logger.warn(`⚠️ Erreur lors de la récupération des types d'objets pour le schéma ${schemaId}: ${error.message}`);
+      return [];
     }
   }
 
@@ -409,6 +466,100 @@ export class JiraAssetService {
   }
 
   /**
+   * Récupérer les définitions des attributs pour un type d'objet donné
+   * Cela permet de mapper les IDs d'attributs vers leurs noms lisibles
+   */
+  async getObjectTypeAttributes(objectTypeName: string, schemaName: string = 'Parc Informatique'): Promise<Record<string, string>> {
+    try {
+      // 1. Trouver l'ID du schéma
+      const schemaId = await this.getObjectSchemaId(schemaName);
+      if (!schemaId) {
+        throw new Error(`Schéma "${schemaName}" non trouvé`);
+      }
+
+      // 2. Trouver l'ID du type d'objet
+      const objectTypes = await this.getAllObjectTypes(schemaId);
+      const objectType = objectTypes.find(ot => ot.name === objectTypeName);
+
+      if (!objectType) {
+        throw new Error(`Type d'objet "${objectTypeName}" non trouvé dans le schéma "${schemaName}"`);
+      }
+
+      // 3. Récupérer les attributs du type d'objet
+      // GET /jsm/assets/workspace/{workspaceId}/v1/objecttype/{id}/attributes
+      const url = this.buildAssetsUrl(`objecttype/${objectType.id}/attributes`);
+
+      const response = await firstValueFrom(
+        this.httpService.get(url, { headers: this.getAuthHeaders() }).pipe(
+          map((res: any) => res.data),
+        ),
+      );
+
+      // Créer un mapping ID -> Nom
+      const attributeMap: Record<string, string> = {};
+
+      if (Array.isArray(response)) {
+        response.forEach((attr: any) => {
+          attributeMap[attr.id] = attr.name;
+        });
+      }
+
+      return attributeMap;
+    } catch (error: any) {
+      this.logger.warn(`⚠️ Impossible de récupérer les définitions des attributs pour ${objectTypeName}: ${error.message}`);
+      return {};
+    }
+  }
+
+  /**
+   * Récupérer les détails complets des attributs pour un type d'objet
+   * Renvoie une liste structuree: { id, name, type, description }
+   */
+  async getObjectTypeAttributesDetails(objectTypeName: string, schemaName: string = 'Parc Informatique'): Promise<any[]> {
+    try {
+      // 1. Trouver l'ID du schéma
+      const schemaId = await this.getObjectSchemaId(schemaName);
+      if (!schemaId) {
+        throw new Error(`Schéma "${schemaName}" non trouvé`);
+      }
+
+      // 2. Trouver l'ID du type d'objet
+      const objectTypes = await this.getAllObjectTypes(schemaId);
+      const objectType = objectTypes.find(ot => ot.name === objectTypeName);
+
+      if (!objectType) {
+        throw new Error(`Type d'objet "${objectTypeName}" non trouvé dans le schéma "${schemaName}"`);
+      }
+
+      // 3. Récupérer les attributs du type d'objet
+      const url = this.buildAssetsUrl(`objecttype/${objectType.id}/attributes`);
+
+      const response = await firstValueFrom(
+        this.httpService.get(url, { headers: this.getAuthHeaders() }).pipe(
+          map((res: any) => res.data),
+        ),
+      );
+
+      if (Array.isArray(response)) {
+        return response.map((attr: any) => ({
+          id: attr.id,
+          name: attr.name,
+          type: attr.type, // 0=Default, 1=Object, 2=User, 7=Status, etc.
+          description: attr.description,
+          defaultType: attr.defaultType, // Text, Integer, Date, etc.
+          editable: attr.editable,
+          removable: attr.removable,
+        }));
+      }
+
+      return [];
+    } catch (error: any) {
+      this.logger.warn(`⚠️ Erreur lors de la récupération des détails des attributs pour ${objectTypeName}: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
    * Synchroniser automatiquement tous les Laptops depuis Jira vers MongoDB
    * Détecte automatiquement les attributs et synchronise efficacement
    */
@@ -458,6 +609,16 @@ export class JiraAssetService {
       if (jiraAssets.length === 0) {
         this.logger.warn(`⚠️ Aucun ${objectTypeName} trouvé dans Jira`);
         return results;
+      }
+
+      // Récupérer les définitions des attributs (ID -> Nom) pour ce type d'objet
+      this.logger.log(`🔍 Récupération des définitions des attributs pour "${objectTypeName}"...`);
+      const attributesDefinitionMap = await this.getObjectTypeAttributes(objectTypeName, schemaName);
+      const attributesCount = Object.keys(attributesDefinitionMap).length;
+      if (attributesCount > 0) {
+        this.logger.log(`✅ ${attributesCount} attributs définis trouvés pour "${objectTypeName}"`);
+      } else {
+        this.logger.warn(`⚠️ Aucune définition d'attribut trouvée, les noms des champs seront absents`);
       }
 
       // Détecter automatiquement les attributs depuis le premier objet si nécessaire
@@ -516,7 +677,7 @@ export class JiraAssetService {
               internalIdAttrId: attributeMapping?.internalIdAttrId,
               assignedUserAttrId: attributeMapping?.assignedUserAttrId,
               forcedType, // Utiliser le type depuis le mapping
-            });
+            }, attributesDefinitionMap); // Passer la map des définitions
 
             if (existingBefore) {
               results.updated++;
@@ -920,6 +1081,7 @@ export class JiraAssetService {
       assignedUserAttrId?: string; // ID de l'attribut utilisateur affecté dans Jira
       forcedType?: EquipmentType; // Type forcé (pour les Laptops, etc.)
     },
+    attributesDefinitionMap?: Record<string, string> // Map des définitions ID -> Nom
   ): Promise<EquipmentDocument> {
     const jiraAsset = await this.getAssetFromJira(jiraAssetId);
 
@@ -929,6 +1091,32 @@ export class JiraAssetService {
       const attr = jiraAsset.attributes.find(a => a.objectTypeAttributeId === attributeId);
       return attr?.objectAttributeValues[0]?.value?.toString();
     };
+
+    // --- CONSTRUCTION DE LA MAP COMPLÈTE DES ATTRIBUTS JIRA ---
+    const jiraAttributes: Record<string, any> = {};
+    if (attributesDefinitionMap) {
+      // Parcourir tous les attributs présents sur l'objet Jira
+      jiraAsset.attributes.forEach(attr => {
+        const attributeName = attributesDefinitionMap[attr.objectTypeAttributeId];
+
+        if (attributeName) {
+          const values = attr.objectAttributeValues.map((val: any) => {
+            // Traiter les différents types de valeurs (texte, référence, statut...)
+            if (val.referencedObject) {
+              return val.referencedObject.name || val.referencedObject.label || 'Référence inconnue';
+            }
+            if (val.status) {
+              return val.status.name;
+            }
+            return val.value; // Valeur brute
+          });
+
+          // Si une seule valeur, on la met directement. Sinon on met le tableau.
+          // On convertit en chaîne si nécessaire, ou on garde le type primitif
+          jiraAttributes[attributeName] = values.length === 1 ? values[0] : values;
+        }
+      });
+    }
 
     const serialNumber = getAttributeValue(attributeMapping.serialNumberAttrId);
     const brand = getAttributeValue(attributeMapping.brandAttrId);
@@ -960,6 +1148,7 @@ export class JiraAssetService {
       type: equipmentType,
       jiraAssetId,
       status: this.mapJiraStatusToEquipmentStatus(status) || EquipmentStatus.DISPONIBLE,
+      jiraAttributes, // Sauvegarder tous les attributs Jira
     };
 
     if (internalId) {

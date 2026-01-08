@@ -63,6 +63,9 @@ export class Equipment {
   @Prop()
   lastSync?: Date; // Dernière synchronisation avec Jira
 
+  @Prop({ type: Object })
+  jiraAttributes?: Record<string, any>; // Tous les attributs Jira (Nom -> Valeur)
+
   @Prop()
   lastSyncedAt?: Date; // Dernière synchronisation avec Jira (alias)
 
