@@ -457,7 +457,7 @@ export class JiraAssetService {
               statusAttrId: attributeMapping?.statusAttrId,
               internalIdAttrId: attributeMapping?.internalIdAttrId,
               assignedUserAttrId: attributeMapping?.assignedUserAttrId,
-              forcedType: 'PC_portable', // Forcer le type pour les Laptops
+              forcedType: EquipmentType.PC_PORTABLE, // Forcer le type pour les Laptops
             });
 
             if (existingBefore) {
