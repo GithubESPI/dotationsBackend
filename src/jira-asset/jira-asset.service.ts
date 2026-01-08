@@ -1,4 +1,4 @@
-import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common';
+﻿import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
@@ -102,10 +102,10 @@ export class JiraAssetService {
 
     // Sinon, récupérer via l'API
     try {
-      const workspaceUrl = this.basePathAssets 
+      const workspaceUrl = this.basePathAssets
         ? `${this.baseUrlAssets.replace(/\/$/, '')}${this.basePathAssets.replace(/^\/+/, '/')}/workspace`
         : `${this.baseUrlAssets.replace(/\/$/, '')}/rest/servicedeskapi/assets/workspace`;
-      
+
       const response = await firstValueFrom(
         this.httpService.get<{ values: JiraAssetWorkspace[] }>(
           workspaceUrl,
@@ -138,7 +138,7 @@ export class JiraAssetService {
    */
   async getAllAssetsFromSchema(schemaName: string, limit: number = 1000): Promise<JiraAssetObjectResponse[]> {
     const workspaceId = await this.getWorkspaceId();
-    const allAssets: JiraAssetObjectResponse[] = [];
+    let allAssets: JiraAssetObjectResponse[] = [];
     let start = 0;
     const pageSize = 100; // Taille de page recommandée pour l'API
 
@@ -149,16 +149,21 @@ export class JiraAssetService {
       // L'endpoint correct est /object/aql (pas /aql/objects)
       const searchUrl = this.buildAssetsUrl('object/aql');
 
+      // Map pour suivre les IDs uniques et éviter les doublons
+      const uniqueAssetsMap = new Map<string, JiraAssetObjectResponse>();
+
       while (true) {
         const aqlBody = {
           qlQuery: `objectSchema = "${schemaName}"`,
-          start,
-          limit: pageSize,
         };
-        
+        // Construire l'URL avec les paramètres de pagination
+        const paginatedUrl = `${searchUrl}?startAt=${start}&maxResults=${pageSize}&includeAttributes=true`;
+
+        this.logger.debug(`   🔍 Requête AQL: URL=${paginatedUrl}`);
+
         const response = await firstValueFrom(
-          this.httpService.post<{ values: JiraAssetObjectResponse[]; size: number; start: number; limit: number }>(
-            searchUrl,
+          this.httpService.post<{ values: JiraAssetObjectResponse[]; size: number; start: number; limit: number; isLast?: boolean; total?: number }>(
+            paginatedUrl,
             aqlBody,
             {
               headers: {
@@ -171,17 +176,39 @@ export class JiraAssetService {
         );
 
         const assets = response.data.values || [];
-        allAssets.push(...assets);
 
-        this.logger.debug(`📦 ${assets.length} objets récupérés (total: ${allAssets.length})`);
+        // Filtrer et ajouter uniquement les nouveaux objets (déduplication par ID)
+        let newAssetsCount = 0;
+        for (const asset of assets) {
+          if (!uniqueAssetsMap.has(asset.id)) {
+            uniqueAssetsMap.set(asset.id, asset);
+            newAssetsCount++;
+          }
+        }
+
+        const pageNum = Math.floor(start / pageSize) + 1;
+        this.logger.log(`📦 Page ${pageNum}: ${assets.length} objets reçus, ${newAssetsCount} nouveaux (total unique: ${uniqueAssetsMap.size})`);
 
         // Vérifier s'il y a plus de résultats
-        if (assets.length < pageSize || allAssets.length >= limit) {
+        const hasMore = newAssetsCount > 0 && uniqueAssetsMap.size < limit && assets.length > 0;
+
+        if (!hasMore) {
+          if (assets.length === 0) {
+            this.logger.log(`✅ Pagination terminée: aucune donnée supplémentaire disponible`);
+          } else if (newAssetsCount === 0) {
+            this.logger.log(`✅ Pagination terminée: aucun nouvel objet unique trouvé`);
+          } else if (uniqueAssetsMap.size >= limit) {
+            this.logger.log(`✅ Pagination terminée: limite atteinte (${uniqueAssetsMap.size}/${limit})`);
+          }
           break;
         }
 
         start += pageSize;
+        this.logger.log(`   ⏭️ Récupération de la page suivante (startAt=${start})...`);
       }
+
+      // Convertir la Map en tableau
+      allAssets = Array.from(uniqueAssetsMap.values());
 
       this.logger.log(`✅ ${allAssets.length} objets récupérés du schéma "${schemaName}"`);
       return allAssets.slice(0, limit); // Limiter au nombre demandé
@@ -205,7 +232,7 @@ export class JiraAssetService {
     objectTypeName: string,
     limit: number = 1000,
   ): Promise<JiraAssetObjectResponse[]> {
-    const allAssets: JiraAssetObjectResponse[] = [];
+    let allAssets: JiraAssetObjectResponse[] = [];
     let start = 0;
     const pageSize = 100; // Taille de page recommandée pour l'API
 
@@ -215,17 +242,23 @@ export class JiraAssetService {
       // Construire l'URL en utilisant JIRA_BASE_URL_ASSETS et JIRA_BASE_PATH_ASSETS si disponible
       const searchUrl = this.buildAssetsUrl('object/aql');
 
+      // Map pour suivre les IDs uniques et éviter les doublons
+      const uniqueAssetsMap = new Map<string, JiraAssetObjectResponse>();
+
       while (true) {
         // Requête AQL pour filtrer par schéma ET type d'objet
+        // IMPORTANT: Utiliser startAt et maxResults au lieu de page et resultPerPage
         const aqlBody = {
           qlQuery: `objectSchema = "${schemaName}" AND objectType = "${objectTypeName}"`,
-          start,
-          limit: pageSize,
         };
-        
+        // Construire l'URL avec les paramètres de pagination
+        const paginatedUrl = `${searchUrl}?startAt=${start}&maxResults=${pageSize}&includeAttributes=true`;
+
+        this.logger.debug(`   🔍 Requête AQL: startAt=${start}, maxResults=${pageSize}`);
+
         const response = await firstValueFrom(
-          this.httpService.post<{ values: JiraAssetObjectResponse[]; size: number; start: number; limit: number }>(
-            searchUrl,
+          this.httpService.post<{ values: JiraAssetObjectResponse[]; size: number; start: number; limit: number; total?: number; isLast?: boolean }>(
+            paginatedUrl,
             aqlBody,
             {
               headers: {
@@ -238,34 +271,49 @@ export class JiraAssetService {
         );
 
         const assets = response.data.values || [];
-        const totalSize = response.data.size || 0; // Nombre total d'objets disponibles
-        allAssets.push(...assets);
+
+        // Filtrer et ajouter uniquement les nouveaux objets (déduplication par ID)
+        let newAssetsCount = 0;
+        for (const asset of assets) {
+          if (!uniqueAssetsMap.has(asset.id)) {
+            uniqueAssetsMap.set(asset.id, asset);
+            newAssetsCount++;
+          }
+        }
 
         const pageNum = Math.floor(start / pageSize) + 1;
-        this.logger.log(`📦 Page ${pageNum}: ${assets.length} objets récupérés (total: ${allAssets.length}${totalSize > 0 ? `/${totalSize}` : ''})`);
+        this.logger.log(`📦 Page ${pageNum}: ${assets.length} objets reçus, ${newAssetsCount} nouveaux (total unique: ${uniqueAssetsMap.size})`);
+
+        // Log de débogage pour vérifier les doublons
+        if (newAssetsCount < assets.length) {
+          this.logger.warn(`   ⚠️ ${assets.length - newAssetsCount} doublons détectés sur cette page`);
+        }
 
         // Vérifier s'il y a plus de résultats
-        // Si on reçoit 0 objets, on a fini
-        // Si totalSize est disponible et qu'on l'a atteint, on a fini
-        // Sinon, continuer tant qu'on reçoit des objets et qu'on n'a pas atteint la limite
-        const hasMore = assets.length > 0 && 
-          (totalSize === 0 || allAssets.length < totalSize) && 
-          allAssets.length < limit;
+        // On arrête si:
+        // - Aucun nouvel objet unique n'a été ajouté
+        // - OU on a atteint la limite demandée
+        // - OU la page est vide
+        const hasMore = newAssetsCount > 0 && uniqueAssetsMap.size < limit && assets.length > 0;
 
         if (!hasMore) {
           if (assets.length === 0) {
             this.logger.log(`✅ Pagination terminée: aucune donnée supplémentaire disponible`);
-          } else if (totalSize > 0 && allAssets.length >= totalSize) {
-            this.logger.log(`✅ Pagination terminée: tous les objets récupérés (${allAssets.length}/${totalSize})`);
-          } else if (allAssets.length >= limit) {
-            this.logger.log(`✅ Pagination terminée: limite atteinte (${allAssets.length}/${limit})`);
+          } else if (newAssetsCount === 0) {
+            this.logger.log(`✅ Pagination terminée: aucun nouvel objet unique trouvé`);
+          } else if (uniqueAssetsMap.size >= limit) {
+            this.logger.log(`✅ Pagination terminée: limite atteinte (${uniqueAssetsMap.size}/${limit})`);
           }
           break;
         }
 
         // Continuer avec la pagination
-        start += assets.length; // Utiliser le nombre réel d'objets reçus plutôt que pageSize
+        start += pageSize;
+        this.logger.log(`   ⏭️ Récupération de la page suivante (startAt=${start})...`);
       }
+
+      // Convertir la Map en tableau
+      allAssets = Array.from(uniqueAssetsMap.values());
 
       this.logger.log(`✅ ${allAssets.length} objets de type "${objectTypeName}" récupérés du schéma "${schemaName}"`);
       return allAssets.slice(0, limit); // Limiter au nombre demandé
@@ -503,10 +551,10 @@ export class JiraAssetService {
 
     try {
       this.logger.log(`🔄 Début de la synchronisation depuis le schéma "${schemaName}"...`);
-      
+
       // Récupérer tous les assets du schéma via AQL
       const jiraAssets = await this.getAllAssetsFromSchema(schemaName);
-      
+
       this.logger.log(`📦 ${jiraAssets.length} assets trouvés dans le schéma "${schemaName}"`);
 
       for (const jiraAsset of jiraAssets) {
@@ -515,14 +563,14 @@ export class JiraAssetService {
           const serialNumberAttr = jiraAsset.attributes.find(
             a => a.objectTypeAttributeId === attributeMapping.serialNumberAttrId
           );
-          
+
           if (!serialNumberAttr || !serialNumberAttr.objectAttributeValues[0]?.value) {
             this.logger.warn(`⚠️ Asset ${jiraAsset.id} ignoré: numéro de série manquant`);
             results.skipped++;
             continue;
           }
 
-          const existingBefore = await this.equipmentModel.findOne({ 
+          const existingBefore = await this.equipmentModel.findOne({
             $or: [
               { jiraAssetId: jiraAsset.id },
               { serialNumber: serialNumberAttr.objectAttributeValues[0].value.toString() }
@@ -753,7 +801,7 @@ export class JiraAssetService {
 
     // Utiliser le type forcé si fourni, sinon celui détecté depuis Jira, sinon 'autre'
     const equipmentType = attributeMapping.forcedType || type || EquipmentType.AUTRE;
-    
+
     const equipmentData: any = {
       serialNumber,
       brand: brand || 'Inconnu',
@@ -964,10 +1012,10 @@ export class JiraAssetService {
 
     try {
       this.logger.log(`🔄 Début de la synchronisation depuis Jira pour le type d'objet ${objectTypeId}...`);
-      
+
       // Récupérer tous les assets (utiliser une requête IQL vide pour tout récupérer)
       const jiraAssets = await this.searchAssetsInJira(objectTypeId, '', 10000);
-      
+
       this.logger.log(`📦 ${jiraAssets.length} assets trouvés dans Jira`);
 
       for (const jiraAsset of jiraAssets) {
@@ -976,14 +1024,14 @@ export class JiraAssetService {
           const serialNumberAttr = jiraAsset.attributes.find(
             a => a.objectTypeAttributeId === attributeMapping.serialNumberAttrId
           );
-          
+
           if (!serialNumberAttr || !serialNumberAttr.objectAttributeValues[0]?.value) {
             this.logger.warn(`⚠️ Asset ${jiraAsset.id} ignoré: numéro de série manquant`);
             results.skipped++;
             continue;
           }
 
-          const existingBefore = await this.equipmentModel.findOne({ 
+          const existingBefore = await this.equipmentModel.findOne({
             $or: [
               { jiraAssetId: jiraAsset.id },
               { serialNumber: serialNumberAttr.objectAttributeValues[0].value.toString() }

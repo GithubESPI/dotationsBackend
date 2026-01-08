@@ -1,0 +1,79 @@
+/**
+ * PATCH COMPLET POUR CORRIGER LA PAGINATION JIRA ASSETS
+ * 
+ * Fichier: src/jira-asset/jira-asset.service.ts
+ * Méthode: getAllAssetsByObjectType
+ * Lignes à modifier: 237-244
+ */
+
+// ========================================
+// ÉTAPE 1: Remplacer les lignes 237-239
+// ========================================
+// ANCIEN CODE (lignes 237-239):
+        };
+        
+        this.logger.debug(`   🔍 Requête AQL: page=${aqlBody.page}, resultPerPage=${aqlBody.resultPerPage}`);
+
+// NOUVEAU CODE:
+        };
+        
+        // Construire l'URL avec les query parameters pour la pagination
+        const paginatedUrl = `${searchUrl}?startAt=${start}&maxResults=${pageSize}&includeAttributes=true`;
+        
+        this.logger.debug(`   🔍 Requête AQL: startAt=${start}, maxResults=${pageSize}`);
+
+
+// ========================================
+// ÉTAPE 2: Remplacer les lignes 241-244
+// ========================================
+// ANCIEN CODE (lignes 241-244):
+        const response = await firstValueFrom(
+          this.httpService.post<{ values: JiraAssetObjectResponse[]; size: number; start: number; limit: number }>(
+            searchUrl,
+            aqlBody,
+
+// NOUVEAU CODE:
+        const response = await firstValueFrom(
+          this.httpService.post<{ values: JiraAssetObjectResponse[]; size: number; startAt: number; maxResults: number; isLast?: boolean; total?: number }>(
+            paginatedUrl,
+            aqlBody,
+
+
+// ========================================
+// RÉSUMÉ DES CHANGEMENTS
+// ========================================
+// 1. Ajout de la variable paginatedUrl avec les query parameters
+// 2. Modification du log pour afficher startAt et maxResults
+// 3. Utilisation de paginatedUrl au lieu de searchUrl
+// 4. Mise à jour du type de retour pour inclure startAt, maxResults, isLast, total
+
+// ========================================
+// APRÈS CES MODIFICATIONS
+// ========================================
+// Le code devrait ressembler à ceci (lignes 232-250):
+
+      while (true) {
+        // Requête AQL pour filtrer par schéma ET type d'objet
+        // IMPORTANT: startAt et maxResults doivent être dans l'URL, pas dans le body
+        const aqlBody = {
+          qlQuery: `objectSchema = "${schemaName}" AND objectType = "${objectTypeName}"`,
+        };
+        
+        // Construire l'URL avec les query parameters pour la pagination
+        const paginatedUrl = `${searchUrl}?startAt=${start}&maxResults=${pageSize}&includeAttributes=true`;
+        
+        this.logger.debug(`   🔍 Requête AQL: startAt=${start}, maxResults=${pageSize}`);
+
+        const response = await firstValueFrom(
+          this.httpService.post<{ values: JiraAssetObjectResponse[]; size: number; startAt: number; maxResults: number; isLast?: boolean; total?: number }>(
+            paginatedUrl,
+            aqlBody,
+            {
+              headers: {
+                Authorization: `Basic ${Buffer.from(`${this.emailAssets}:${this.apiTokenAssets.replace(/^[\"']|[\"']$/g, '')}`).toString('base64')}`,
+                Accept: 'application/json',
+                'Content-Type': 'application/json',
+              },
+            },
+          ),
+        );

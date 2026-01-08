@@ -14,7 +14,7 @@ export class EmployeesService {
   constructor(
     @InjectModel(User.name) private userModel: Model<UserDocument>,
     private graphService: GraphService,
-  ) {}
+  ) { }
 
   /**
    * Créer ou mettre à jour un employé depuis les données Office 365
@@ -23,7 +23,7 @@ export class EmployeesService {
   async createOrUpdateFromGraph(graphUser: any, accessToken?: string): Promise<UserDocument> {
     // Utiliser userPrincipalName comme identifiant unique Office 365
     const office365Id = graphUser.userPrincipalName || graphUser.id;
-    
+
     if (!office365Id) {
       throw new BadRequestException('userPrincipalName ou id manquant dans les données Graph');
     }
@@ -78,20 +78,9 @@ export class EmployeesService {
       office365Id: employeeData.office365Id,
     });
 
-        // Récupérer la photo de profil si un token est fourni
-        if (accessToken && graphUser.id) {
-          try {
-            const photo = await this.graphService.getUserPhoto(accessToken, graphUser.id);
-            if (photo) {
-              employeeData.profilePicture = photo;
-              // Stocker aussi l'URL de la photo Graph API
-              employeeData.profilePictureUrl = `https://graph.microsoft.com/v1.0/users/${graphUser.id}/photo/$value`;
-            }
-          } catch (error: any) {
-            // La photo peut ne pas exister, ce n'est pas une erreur critique
-            this.logger.debug(`   Photo non disponible pour ${graphUser.userPrincipalName}`);
-          }
-        }
+    // NOTE: La récupération de la photo de profil a été déplacée dans une méthode séparée
+    // pour éviter de ralentir la synchronisation principale (14775+ appels API)
+    // Utiliser syncProfilePhotos() après la synchronisation principale
 
     if (existingEmployee) {
       // Mettre à jour avec les nouvelles données depuis Office 365
@@ -159,11 +148,11 @@ export class EmployeesService {
           'profilePicture',
           'profilePictureUrl',
         ].join(',');
-        
+
         const url = nextLink || `${baseUrl}?$select=${selectParams}&$expand=manager($select=id,displayName,userPrincipalName)&$top=999`;
-        
+
         this.logger.debug(`   Requête: ${url.replace(accessToken.substring(0, 20), '***')}`);
-        
+
         const response = await fetch(url, {
           headers: {
             Authorization: `Bearer ${accessToken}`,
@@ -213,6 +202,9 @@ export class EmployeesService {
           }
         }
 
+        // Log de progression après chaque lot
+        this.logger.log(`   📊 Progression: ${synced} synchronisés, ${skipped} ignorés, ${errors} erreurs`);
+
         // Gérer la pagination
         nextLink = data['@odata.nextLink'] || null;
         if (nextLink) {
@@ -224,7 +216,7 @@ export class EmployeesService {
       this.logger.log(`   - ${synced} utilisateurs synchronisés`);
       this.logger.log(`   - ${skipped} utilisateurs ignorés (invités/système)`);
       this.logger.log(`   - ${errors} erreurs`);
-      
+
       return { synced, errors, skipped };
     } catch (error: any) {
       this.logger.error('❌ Erreur lors de la synchronisation Office 365:', error);
@@ -333,12 +325,12 @@ export class EmployeesService {
    */
   async update(id: string, updateDto: UpdateEmployeeDto): Promise<UserDocument> {
     const employee = await this.findOne(id);
-    
+
     // Ne pas permettre la modification de l'office365Id (identifiant unique Office 365)
     if (updateDto.office365Id && updateDto.office365Id !== employee.office365Id) {
       throw new BadRequestException('Impossible de modifier l\'identifiant Office 365. Utilisez la synchronisation pour mettre à jour depuis Office 365.');
     }
-    
+
     Object.assign(employee, updateDto);
     return employee.save();
   }
@@ -373,6 +365,88 @@ export class EmployeesService {
       inactive,
       byDepartment,
     };
+  }
+
+  /**
+   * Synchroniser les photos de profil des employés
+   * Cette méthode doit être appelée APRÈS la synchronisation principale
+   * Elle traite les employés par lots pour éviter de surcharger l'API
+   */
+  async syncProfilePhotos(
+    accessToken: string,
+    batchSize: number = 50,
+    maxUsers: number = 100
+  ): Promise<{ updated: number; errors: number; skipped: number }> {
+    this.logger.log('📸 Début de la synchronisation des photos de profil...');
+
+    let updated = 0;
+    let errors = 0;
+    let skipped = 0;
+
+    try {
+      // Récupérer les employés qui n'ont pas de photo (limité à maxUsers)
+      const employeesWithoutPhoto = await this.userModel
+        .find({
+          isActive: true,
+          $or: [
+            { profilePicture: { $exists: false } },
+            { profilePicture: null },
+            { profilePicture: '' }
+          ]
+        })
+        .limit(maxUsers)
+        .exec();
+
+      this.logger.log(`   ${employeesWithoutPhoto.length} employés sans photo trouvés (max: ${maxUsers})`);
+
+      // Traiter par lots
+      for (let i = 0; i < employeesWithoutPhoto.length; i += batchSize) {
+        const batch = employeesWithoutPhoto.slice(i, i + batchSize);
+        this.logger.log(`   Traitement du lot ${Math.floor(i / batchSize) + 1}/${Math.ceil(employeesWithoutPhoto.length / batchSize)}...`);
+
+        // Traiter chaque employé du lot
+        for (const employee of batch) {
+          try {
+            // Extraire l'ID Graph depuis office365Id ou chercher l'utilisateur
+            const graphId = employee.office365Id?.split('@')[0]; // Simplification
+
+            if (!graphId) {
+              skipped++;
+              continue;
+            }
+
+            const photo = await this.graphService.getUserPhoto(accessToken, employee.office365Id);
+
+            if (photo) {
+              employee.profilePicture = photo;
+              employee.profilePictureUrl = `https://graph.microsoft.com/v1.0/users/${employee.office365Id}/photo/$value`;
+              await employee.save();
+              updated++;
+            } else {
+              skipped++;
+            }
+          } catch (error: any) {
+            this.logger.debug(`   Photo non disponible pour ${employee.office365Id}`);
+            skipped++;
+          }
+        }
+
+        // Petite pause entre les lots pour éviter le rate limiting
+        if (i + batchSize < employeesWithoutPhoto.length) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+
+      this.logger.log(`✅ Synchronisation des photos terminée:`);
+      this.logger.log(`   - ${updated} photos mises à jour`);
+      this.logger.log(`   - ${skipped} photos non disponibles`);
+      this.logger.log(`   - ${errors} erreurs`);
+
+      return { updated, errors, skipped };
+    } catch (error: any) {
+      this.logger.error('❌ Erreur lors de la synchronisation des photos:', error);
+      throw error;
+    }
   }
 }
 

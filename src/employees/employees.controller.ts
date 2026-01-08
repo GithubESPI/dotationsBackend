@@ -34,7 +34,7 @@ import { UpdateEmployeeDto } from './dto/update-employee.dto';
 @UseGuards(JwtAuthGuard)
 @ApiBearerAuth('JWT-auth')
 export class EmployeesController {
-  constructor(private readonly employeesService: EmployeesService) {}
+  constructor(private readonly employeesService: EmployeesService) { }
 
   @Get()
   @ApiOperation({ summary: 'Rechercher des employés avec filtres et pagination' })
@@ -80,7 +80,7 @@ export class EmployeesController {
 
   @Post('sync')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Synchroniser les employés depuis Office 365',
     description: 'Récupère tous les utilisateurs depuis Microsoft Graph API et les synchronise dans MongoDB. Nécessite un token Azure AD valide.',
   })
@@ -104,17 +104,17 @@ export class EmployeesController {
   ) {
     // 1. Récupérer le token Azure AD depuis le body
     let azureToken = body?.token;
-    
+
     // 2. Si pas dans le body, essayer de récupérer depuis la session (si disponible)
     if (!azureToken && req?.session?.azureAccessToken && req.session.userId === user.id) {
       azureToken = req.session.azureAccessToken;
     }
-    
+
     // 3. Si pas dans la session, essayer de récupérer depuis le user (si stocké dans le JWT - non implémenté actuellement)
     if (!azureToken && (user as any).azureAccessToken) {
       azureToken = (user as any).azureAccessToken;
     }
-    
+
     if (!azureToken) {
       throw new BadRequestException(
         'Token Azure AD requis pour la synchronisation. ' +
@@ -126,8 +126,61 @@ export class EmployeesController {
     return this.employeesService.syncFromOffice365(azureToken);
   }
 
+  @Post('sync-photos')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Synchroniser les photos de profil des employés',
+    description: 'Récupère les photos de profil depuis Microsoft Graph API pour les employés qui n\'en ont pas. Cette opération doit être effectuée APRÈS la synchronisation principale.',
+  })
+  @ApiQuery({ name: 'batchSize', required: false, description: 'Nombre d\'employés à traiter par lot (défaut: 50)' })
+  @ApiQuery({ name: 'maxUsers', required: false, description: 'Nombre maximum d\'employés à traiter (défaut: 100)' })
+  @ApiResponse({
+    status: 200,
+    description: 'Synchronisation des photos réussie',
+    schema: {
+      type: 'object',
+      properties: {
+        updated: { type: 'number', description: 'Nombre de photos mises à jour' },
+        errors: { type: 'number', description: 'Nombre d\'erreurs' },
+        skipped: { type: 'number', description: 'Nombre de photos non disponibles' },
+      },
+    },
+  })
+  @ApiResponse({ status: 401, description: 'Token Azure AD invalide ou manquant' })
+  async syncProfilePhotos(
+    @CurrentUser() user: UserPayload,
+    @Query('batchSize') batchSize?: number,
+    @Query('maxUsers') maxUsers?: number,
+    @Body() body?: { token?: string },
+    @Request() req?: any,
+  ) {
+    // Récupérer le token Azure AD (même logique que syncFromOffice365)
+    let azureToken = body?.token;
+
+    if (!azureToken && req?.session?.azureAccessToken && req.session.userId === user.id) {
+      azureToken = req.session.azureAccessToken;
+    }
+
+    if (!azureToken && (user as any).azureAccessToken) {
+      azureToken = (user as any).azureAccessToken;
+    }
+
+    if (!azureToken) {
+      throw new BadRequestException(
+        'Token Azure AD requis pour la synchronisation. ' +
+        'Fournissez-le dans le body: { "token": "votre_token_azure_ad" }'
+      );
+    }
+
+    return this.employeesService.syncProfilePhotos(
+      azureToken,
+      batchSize ? Number(batchSize) : 50,
+      maxUsers ? Number(maxUsers) : 100
+    );
+  }
+
   @Put(':id')
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Mettre à jour un employé',
     description: '⚠️ Les employés sont synchronisés depuis Office 365. Les mises à jour manuelles sont limitées. Pour une synchronisation complète, utilisez POST /employees/sync',
   })
