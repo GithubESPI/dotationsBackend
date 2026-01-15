@@ -52,6 +52,12 @@ export class DocumentModel {
   @Prop({ required: true })
   fileSize: number;
 
+  @Prop()
+  storageUrl?: string; // URL Azure Blob Storage
+
+  @Prop({ default: 'gridfs', enum: ['gridfs', 'azure'] })
+  storageType: string;
+
   @Prop({
     type: {
       userName: String,

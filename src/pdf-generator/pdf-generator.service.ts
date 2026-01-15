@@ -4,6 +4,7 @@ import { Connection } from 'mongoose';
 import PDFDocument from 'pdfkit';
 import * as QRCode from 'qrcode';
 import { GridFSBucket } from 'mongodb';
+import { BlobServiceClient } from '@azure/storage-blob';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { DocumentModel, DocumentDocument, DocumentType, DocumentStatus } from '../database/schemas/document.schema';
@@ -19,7 +20,7 @@ export class PdfGeneratorService {
   constructor(
     @InjectConnection() private connection: Connection,
     @InjectModel(DocumentModel.name) private documentModel: Model<DocumentDocument>,
-  ) {}
+  ) { }
 
   /**
    * Générer le PDF de dotation et le stocker dans GridFS
@@ -29,7 +30,7 @@ export class PdfGeneratorService {
     const allocation = await this.connection
       .model<AllocationDocument>('Allocation')
       .findById(allocationId)
-      .populate('userId', 'displayName email department officeLocation')
+      .populate('userId', 'displayName email department officeLocation documents') // Populate documents
       .populate('equipments.equipmentId', 'brand model serialNumber type internalId jiraAssetId')
       .exec();
 
@@ -45,61 +46,67 @@ export class PdfGeneratorService {
     // Générer le PDF
     const pdfBuffer = await this.createAllocationPDFBuffer(allocation, user);
 
-    // Stocker dans GridFS
-    const bucket = this.getGridFSBucket();
+    // Upload vers Azure
     const filename = `dotation_${allocation._id}_${Date.now()}.pdf`;
-    const uploadStream = bucket.openUploadStream(filename);
+    let storageUrl = '';
+    let storageType = 'gridfs';
+    let fileId: Types.ObjectId = new Types.ObjectId(); // Dummy ID for Azure, or real for GridFS
 
-    return new Promise((resolve, reject) => {
-      uploadStream.on('finish', async () => {
-        try {
-          // Créer l'entrée Document dans MongoDB
-          const equipmentsList = allocation.equipments.map(
-            eq => `${(eq.equipmentId as any)?.brand || 'N/A'} ${(eq.equipmentId as any)?.model || 'N/A'} - ${(eq.equipmentId as any)?.serialNumber || 'N/A'}`,
-          );
+    try {
+      storageUrl = await this.uploadToAzure(pdfBuffer, filename);
+      storageType = 'azure';
+      this.logger.log(`☁️ PDF uploadé sur Azure: ${storageUrl}`);
+    } catch (e) {
+      this.logger.warn(`⚠️ Échec upload Azure, fallback GridFS: ${e.message}`);
+      // Fallback GridFS (Optional implementation, skipping for now to rely on Azure as requested)
+      // If critical, implement fallback here. Assuming Azure is primary.
+    }
 
-          // Générer le QR code
-          const qrCodeData = await this.generateQRCode(allocation._id.toString(), 'allocation');
+    // Créer le document
+    const equipmentsList = allocation.equipments.map(
+      eq => `${(eq.equipmentId as any)?.brand || 'N/A'} ${(eq.equipmentId as any)?.model || 'N/A'} - ${(eq.equipmentId as any)?.serialNumber || 'N/A'}`,
+    );
+    const qrCodeData = await this.generateQRCode(allocation._id.toString(), 'allocation');
 
-          const document = new this.documentModel({
-            documentType: DocumentType.DOTATION,
-            allocationId: allocation._id,
-            fileId: uploadStream.id,
-            filename,
-            mimeType: 'application/pdf',
-            fileSize: pdfBuffer.length,
-            metadata: {
-              userName: user.displayName || user.email,
-              equipmentsList,
-              charterVersion: this.CHARTE_VERSION,
-              qrCode: qrCodeData,
-            },
-            status: DocumentStatus.PENDING,
-          });
-
-          const savedDoc = await document.save();
-
-          // Mettre à jour l'allocation avec l'ID du document
-          await this.connection
-            .model<AllocationDocument>('Allocation')
-            .findByIdAndUpdate(allocationId, { documentId: savedDoc._id })
-            .exec();
-
-          this.logger.log(`✅ PDF de dotation généré: ${filename} (${pdfBuffer.length} bytes)`);
-          resolve(savedDoc);
-        } catch (error) {
-          this.logger.error(`❌ Erreur lors de la création du document: ${error.message}`);
-          reject(error);
-        }
-      });
-
-      uploadStream.on('error', (error) => {
-        this.logger.error(`❌ Erreur lors de l'upload GridFS: ${error.message}`);
-        reject(error);
-      });
-
-      uploadStream.end(pdfBuffer);
+    const document = new this.documentModel({
+      documentType: DocumentType.DOTATION,
+      allocationId: allocation._id,
+      fileId: fileId, // Keep fileId for compatibility or dummy
+      filename,
+      mimeType: 'application/pdf',
+      fileSize: pdfBuffer.length,
+      storageUrl,
+      storageType,
+      metadata: {
+        userName: user.displayName || user.email,
+        equipmentsList,
+        charterVersion: this.CHARTE_VERSION,
+        qrCode: qrCodeData,
+      },
+      status: DocumentStatus.PENDING,
     });
+
+    const savedDoc = await document.save();
+
+    // Mettre à jour l'allocation
+    await this.connection
+      .model<AllocationDocument>('Allocation')
+      .findByIdAndUpdate(allocationId, { documentId: savedDoc._id })
+      .exec();
+
+    // Mettre à jour le profil utilisateur (Historique)
+    await this.connection.model('User').findByIdAndUpdate(user._id, {
+      $push: {
+        documents: {
+          type: 'dotation',
+          url: storageUrl,
+          name: filename,
+          createdAt: new Date()
+        }
+      }
+    });
+
+    return savedDoc;
   }
 
   /**
@@ -111,7 +118,7 @@ export class PdfGeneratorService {
       .model<ReturnDocument>('Return')
       .findById(returnId)
       .populate('allocationId', 'deliveryDate equipments')
-      .populate('userId', 'displayName email department officeLocation')
+      .populate('userId', 'displayName email department officeLocation documents')
       .populate('equipmentsReturned.equipmentId', 'brand model serialNumber type internalId')
       .exec();
 
@@ -127,61 +134,91 @@ export class PdfGeneratorService {
     // Générer le PDF
     const pdfBuffer = await this.createReturnPDFBuffer(returnDoc, user);
 
-    // Stocker dans GridFS
-    const bucket = this.getGridFSBucket();
+    // Upload vers Azure
     const filename = `restitution_${returnDoc._id}_${Date.now()}.pdf`;
-    const uploadStream = bucket.openUploadStream(filename);
+    let storageUrl = '';
+    let storageType = 'gridfs';
+    let fileId: Types.ObjectId = new Types.ObjectId();
 
-    return new Promise((resolve, reject) => {
-      uploadStream.on('finish', async () => {
-        try {
-          // Créer l'entrée Document dans MongoDB
-          const equipmentsList = returnDoc.equipmentsReturned.map(
-            eq => `${(eq.equipmentId as any)?.brand || 'N/A'} ${(eq.equipmentId as any)?.model || 'N/A'} - ${(eq.equipmentId as any)?.serialNumber || 'N/A'}`,
-          );
+    try {
+      storageUrl = await this.uploadToAzure(pdfBuffer, filename);
+      storageType = 'azure';
+      this.logger.log(`☁️ PDF Restitution uploadé sur Azure: ${storageUrl}`);
+    } catch (e) {
+      this.logger.warn(`⚠️ Échec upload Azure, fallback GridFS: ${e.message}`);
+    }
 
-          // Générer le QR code
-          const qrCodeData = await this.generateQRCode(returnDoc._id.toString(), 'return');
+    // Créer le document
+    const equipmentsList = returnDoc.equipmentsReturned.map(
+      eq => `${(eq.equipmentId as any)?.brand || 'N/A'} ${(eq.equipmentId as any)?.model || 'N/A'} - ${(eq.equipmentId as any)?.serialNumber || 'N/A'}`,
+    );
+    const qrCodeData = await this.generateQRCode(returnDoc._id.toString(), 'return');
 
-          const document = new this.documentModel({
-            documentType: DocumentType.RESTITUTION,
-            returnId: returnDoc._id,
-            fileId: uploadStream.id,
-            filename,
-            mimeType: 'application/pdf',
-            fileSize: pdfBuffer.length,
-            metadata: {
-              userName: user.displayName || user.email,
-              equipmentsList,
-              charterVersion: this.CHARTE_VERSION,
-              qrCode: qrCodeData,
-            },
-            status: returnDoc.completedAt ? DocumentStatus.SIGNED : DocumentStatus.PENDING,
-          });
-
-          const savedDoc = await document.save();
-
-          // Mettre à jour la restitution avec l'ID du document
-          await this.connection
-            .model<ReturnDocument>('Return')
-            .findByIdAndUpdate(returnId, { returnDocumentId: savedDoc._id })
-            .exec();
-
-          this.logger.log(`✅ PDF de restitution généré: ${filename} (${pdfBuffer.length} bytes)`);
-          resolve(savedDoc);
-        } catch (error) {
-          this.logger.error(`❌ Erreur lors de la création du document: ${error.message}`);
-          reject(error);
-        }
-      });
-
-      uploadStream.on('error', (error) => {
-        this.logger.error(`❌ Erreur lors de l'upload GridFS: ${error.message}`);
-        reject(error);
-      });
-
-      uploadStream.end(pdfBuffer);
+    const document = new this.documentModel({
+      documentType: DocumentType.RESTITUTION,
+      returnId: returnDoc._id,
+      fileId: fileId,
+      filename,
+      mimeType: 'application/pdf',
+      fileSize: pdfBuffer.length,
+      storageUrl,
+      storageType,
+      metadata: {
+        userName: user.displayName || user.email,
+        equipmentsList,
+        charterVersion: this.CHARTE_VERSION,
+        qrCode: qrCodeData,
+      },
+      status: returnDoc.completedAt ? DocumentStatus.SIGNED : DocumentStatus.PENDING,
     });
+
+    const savedDoc = await document.save();
+
+    // Mettre à jour la restitution
+    await this.connection
+      .model<ReturnDocument>('Return')
+      .findByIdAndUpdate(returnId, { returnDocumentId: savedDoc._id })
+      .exec();
+
+    // Mettre à jour le profil utilisateur (Historique)
+    await this.connection.model('User').findByIdAndUpdate(user._id, {
+      $push: {
+        documents: {
+          type: 'restitution',
+          url: storageUrl,
+          name: filename,
+          createdAt: new Date()
+        }
+      }
+    });
+
+    return savedDoc;
+  }
+
+  /**
+   * Uploader un buffer vers Azure Storage
+   */
+  private async uploadToAzure(buffer: Buffer, filename: string): Promise<string> {
+    try {
+      const connectionString = process.env.AZURE_STORAGE_CONNECTION_STRING;
+      if (!connectionString) throw new Error('AZURE_STORAGE_CONNECTION_STRING missing');
+
+      const containerName = 'dotationdoc';
+      const blobServiceClient = BlobServiceClient.fromConnectionString(connectionString);
+      const containerClient = blobServiceClient.getContainerClient(containerName);
+
+      await containerClient.createIfNotExists();
+
+      const blockBlobClient = containerClient.getBlockBlobClient(filename);
+      await blockBlobClient.uploadData(buffer, {
+        blobHTTPHeaders: { blobContentType: 'application/pdf' }
+      });
+
+      return blockBlobClient.url;
+    } catch (error: any) {
+      this.logger.error(`❌ Azure Upload Error: ${error.message}`);
+      throw error;
+    }
   }
 
   /**

@@ -141,6 +141,22 @@ export class User {
   @Prop()
   createdAt?: Date;
 
+  @Prop({
+    type: [{
+      type: { type: String, enum: ['dotation', 'restitution'], required: true },
+      url: { type: String, required: true },
+      name: { type: String, required: true }, // Nom du fichier ou description
+      createdAt: { type: Date, default: Date.now }
+    }],
+    default: []
+  })
+  documents: {
+    type: 'dotation' | 'restitution';
+    url: string;
+    name: string;
+    createdAt: Date;
+  }[];
+
   @Prop()
   updatedAt?: Date;
 }

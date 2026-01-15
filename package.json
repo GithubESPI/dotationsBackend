@@ -30,6 +30,7 @@
     "sync:laptops:api": "node scripts/sync-laptops-from-jira.js"
   },
   "dependencies": {
+    "@azure/storage-blob": "^12.29.1",
     "@microsoft/microsoft-graph-client": "^3.0.7",
     "@nestjs/axios": "^4.0.1",
     "@nestjs/common": "^11.0.1",
