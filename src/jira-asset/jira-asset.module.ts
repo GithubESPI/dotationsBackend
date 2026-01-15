@@ -4,6 +4,8 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { JiraAssetController } from './jira-asset.controller';
 import { JiraAssetService } from './jira-asset.service';
 import { Equipment, EquipmentSchema } from '../database/schemas/equipment.schema';
+import { AllocationsModule } from '../allocations/allocations.module';
+import { forwardRef } from '@nestjs/common';
 
 @Module({
   imports: [
@@ -14,10 +16,11 @@ import { Equipment, EquipmentSchema } from '../database/schemas/equipment.schema
     MongooseModule.forFeature([
       { name: Equipment.name, schema: EquipmentSchema },
     ]),
+    forwardRef(() => AllocationsModule),
   ],
   controllers: [JiraAssetController],
   providers: [JiraAssetService],
   exports: [JiraAssetService], // Export pour utilisation dans d'autres modules (scheduler)
 })
-export class JiraAssetModule {}
+export class JiraAssetModule { }
 

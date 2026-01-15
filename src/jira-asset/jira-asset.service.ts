@@ -1,4 +1,5 @@
-﻿import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common';
+﻿import { Injectable, Logger, BadRequestException, NotFoundException, Inject, forwardRef, Optional } from '@nestjs/common';
+import { AllocationsService } from '../allocations/allocations.service';
 import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
@@ -63,6 +64,7 @@ export class JiraAssetService {
     private readonly configService: ConfigService,
     private readonly httpService: HttpService,
     @InjectModel(Equipment.name) private equipmentModel: Model<EquipmentDocument>,
+    @Optional() @Inject(forwardRef(() => AllocationsService)) private readonly allocationsService?: AllocationsService,
   ) {
     // Variables pour l'API Jira classique (rétrocompatibilité)
     this.baseUrl = this.configService.get<string>('JIRA_BASE_URL') || '';
@@ -108,7 +110,137 @@ export class JiraAssetService {
   }
 
   /**
-   * Rechercher un utilisateur Jira par email pour obtenir son accountId
+   * Rechercher un objet Utilisateur dans Jira Assets par email
+   * Chercher un utilisateur Asset par Email ou Nom
+   */
+  async findAssetUserByEmail(email: string, displayName?: string): Promise<JiraAssetObjectResponse | null> {
+    try {
+      this.logger.debug(`🔍 Recherche de l'utilisateur Asset: Email=${email}, Name=${displayName}`);
+      const schemaName = 'Parc Informatique'; // Nom correct selon les logs
+      const objectTypeName = 'Users';
+
+      // 1. Récupérer les attributs pour identifier les champs
+      const attributesDefinition = await this.getObjectTypeAttributesDetails(objectTypeName, schemaName);
+
+      const emailAttr = attributesDefinition.find(a => ['email', 'e-mail', 'mail'].includes(a.name.toLowerCase()));
+      const nameDefs = attributesDefinition.find(a => ['name', 'nom complet'].includes(a.name.toLowerCase()));
+      const nomAttr = attributesDefinition.find(a => ['nom', 'lastname', 'surname'].includes(a.name.toLowerCase()));
+
+      let queryParts: string[] = [];
+
+      // Stratégie de recherche: Email OU Name
+      if (emailAttr) {
+        queryParts.push(`"${emailAttr.name}" = "${email}"`);
+      }
+      // Recherche par le nom (Name default ou attribut Nom)
+      // On essaye de construire une recherche sur le texte
+      if (email) {
+        // Fallback recherche textuelle large si pas d'attribut email spécifique
+        if (!emailAttr) queryParts.push(`anyAttribute LIKE "${email}"`);
+      }
+
+      queryParts.push(`"Name" LIKE "${email}"`); // Souvent le Name contient le nom affiché ou email
+      // Recherche aussi par le Nom s'il est fourni (pour éviter les doublons si l'email n'est pas rempli)
+      // On suppose que l'email peut servir d'identifiant textuel si le nom est manquant lors de l'appel
+      // Mais ici on utilise l'argument 'email' qui est souvent l'identifiant principal
+      if (nomAttr) {
+        queryParts.push(`"${nomAttr.name}" LIKE "${email}"`);
+        if (displayName) queryParts.push(`"${nomAttr.name}" LIKE "${displayName}"`);
+      }
+      if (displayName) {
+        queryParts.push(`"Name" LIKE "${displayName}"`);
+      }
+
+      // Si l'email ressemble à un nom (ex: "prenom.nom"), on peut essayer de chercher "Prenom Nom" ? 
+      // Pour l'instant on reste sur la valeur exacte ou contenue de l'email.
+
+      const query = `objectType = "${objectTypeName}" AND (${queryParts.join(' OR ')})`;
+
+      this.logger.debug(`🔍 AQL Query: ${query}`);
+
+      const results = await this.searchAssetsInJira(objectTypeName, query, 1);
+
+      if (results.length > 0) {
+        this.logger.debug(`✅ Utilisateur Asset trouvé: ${results[0].objectKey}`);
+        return results[0];
+      }
+
+      return null;
+    } catch (error) {
+      this.logger.warn(`⚠️ Erreur recherche utilisateur Asset: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Créer un objet Utilisateur dans Jira Assets
+   */
+  async createAssetUser(user: { email: string; firstName: string; lastName: string; displayName: string }): Promise<JiraAssetObjectResponse | null> {
+    try {
+      this.logger.log(`👤 Création de l'utilisateur Asset: ${user.email}`);
+      const schemaName = 'Parc Informatique';
+      const objectTypeName = 'Users';
+
+      // 1. Récupérer l'ID du type d'objet
+      const schemaId = await this.getObjectSchemaId(schemaName);
+      const objectTypes = await this.getAllObjectTypes(schemaId!);
+      const objectType = objectTypes.find(ot => ot.name === objectTypeName);
+
+      if (!objectType) throw new Error(`Type d'objet "${objectTypeName}" non trouvé`);
+
+      // 2. Récupérer les définitions d'attributs pour mapper les valeurs
+      const attributesDefinition = await this.getObjectTypeAttributesDetails(objectTypeName, schemaName);
+
+      const attributesToCreate: any[] = [];
+
+      // Helper pour trouver l'attribut définitions
+      const findAttr = (names: string[]) => attributesDefinition.find(a => names.includes(a.name.toLowerCase()));
+
+      const nomAttr = findAttr(['nom', 'lastname', 'surname']);
+      const prenomsAttr = findAttr(['prenoms', 'prénoms', 'firstname', 'givenname']);
+      const emailAttr = findAttr(['email', 'e-mail', 'mail']);
+      const nameAttr = findAttr(['name', 'nom complet']);
+
+      // IMPORTANT: On ne remplit QUE les champs texte (Type=0). 
+      // Si un champ est de Type=2 (User), on ne peut PAS mettre une string, il faut un accountId Jira.
+      // Comme l'utilisateur n'existe pas dans Jira (c'est le but), on saute les champs User.
+
+      if (nomAttr && nomAttr.type !== 2) {
+        // Utiliser le displayName pour le champ "Nom" comme demandé (ex: "Abdel Bachouta")
+        attributesToCreate.push({ objectTypeAttributeId: nomAttr.id, objectAttributeValues: [{ value: user.displayName }] });
+      }
+      if (prenomsAttr && prenomsAttr.type !== 2) {
+        attributesToCreate.push({ objectTypeAttributeId: prenomsAttr.id, objectAttributeValues: [{ value: user.firstName }] });
+      }
+      if (emailAttr && emailAttr.type !== 2) {
+        attributesToCreate.push({ objectTypeAttributeId: emailAttr.id, objectAttributeValues: [{ value: user.email }] });
+      }
+
+      // Le champ "Name" (interne Assets) est toujours requis.
+      if (nameAttr && nameAttr.id !== nomAttr?.id && nameAttr.id !== prenomsAttr?.id) {
+        attributesToCreate.push({ objectTypeAttributeId: nameAttr.id, objectAttributeValues: [{ value: user.displayName }] });
+      } else {
+        // Si on n'a pas trouvé d'attribut "Name" explicite, Assets utilise souvent le premier attribut texte ou un attribut spécial "Name"
+        // Si 'nomAttr' est le Name, il est déjà mis.
+        // On peut essayer de forcer l'attribut Name par défaut si on le connaissait, mais map le displayName sur 'Name' est une bonne pratique.
+        // Cherchons l'attribut qui s'appelle "Name" (souvent ID bas ou type 0)
+        const defaultNameAttr = attributesDefinition.find(a => a.name === 'Name');
+        if (defaultNameAttr && !attributesToCreate.find(a => a.objectTypeAttributeId === defaultNameAttr.id)) {
+          attributesToCreate.push({ objectTypeAttributeId: defaultNameAttr.id, objectAttributeValues: [{ value: user.displayName }] });
+        }
+      }
+
+      return await this.createAssetInJira(objectType.id, attributesToCreate);
+
+    } catch (error) {
+      this.logger.error(`❌ Impossible de créer l'utilisateur Asset ${user.email}: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Rechercher un utilisateur Jira par email (Legacy)
+   * ... conservation de l'ancienne méthode au cas où ...
    */
   async findJiraUserByEmail(email: string): Promise<string | null> {
     try {
@@ -242,6 +374,9 @@ export class JiraAssetService {
 
       if (response && response.values) {
         const schema = response.values.find((s: any) => s.name === schemaName);
+        if (!schema) {
+          this.logger.warn(`⚠️ Schéma "${schemaName}" non trouvé. Schémas disponibles: ${response.values.map((s: any) => `"${s.name}" (ID:${s.id})`).join(', ')}`);
+        }
         return schema ? schema.id : null;
       }
       return null;
@@ -1144,28 +1279,24 @@ export class JiraAssetService {
     const workspaceId = await this.getWorkspaceId();
 
     try {
-      // Utiliser l'API de recherche Jira Asset
-      // Note: L'API exacte peut varier selon la version de Jira Asset
-      const searchUrl = this.buildAssetsUrl('object/navlist/iql');
+      // Endpoint mis à jour pour la recherche IQL (GET)
+      const searchUrl = this.buildAssetsUrl('iql/objects');
       const response = await firstValueFrom(
-        this.httpService.post<{ values: JiraAssetObjectResponse[] }>(
+        this.httpService.get<{ objectEntries: JiraAssetObjectResponse[] }>(
           searchUrl,
           {
-            objectTypeId,
-            iql: query || '',
-            resultPerPage: limit,
-          },
-          {
-            headers: {
-              Authorization: `Basic ${Buffer.from(`${this.emailAssets}:${this.apiTokenAssets.replace(/^["']|["']$/g, '')}`).toString('base64')}`,
-              Accept: 'application/json',
-              'Content-Type': 'application/json',
+            params: {
+              objectTypeId,
+              iql: query || '',
+              page: 1,
+              resultPerPage: limit,
             },
+            headers: this.getAuthHeaders(),
           },
         ),
       );
 
-      return response.data.values || [];
+      return response.data.objectEntries || (response.data as any).values || [];
     } catch (error: any) {
       this.logger.error(`❌ Erreur lors de la recherche d'assets dans Jira: ${error.message}`);
       if (error.response) {
@@ -1307,6 +1438,11 @@ export class JiraAssetService {
       this.logger.log(`✅ Équipement créé depuis Jira: ${serialNumber}`);
     }
 
+    // Gestion automatique des allocations: Si l'équipement est disponible ("En stock"), on clôture les allocations en cours
+    if (equipmentData.status === EquipmentStatus.DISPONIBLE && this.allocationsService) {
+      await this.allocationsService.closeActiveAllocationForEquipment(equipment._id.toString());
+    }
+
     return equipment;
   }
 
@@ -1412,7 +1548,7 @@ export class JiraAssetService {
   async updateEquipmentStatusInJira(
     equipmentId: string,
     attributeMapping: {
-      statusAttrId: string;
+      statusAttrId?: string;
       assignedUserAttrId?: string;
     },
   ): Promise<void> {
@@ -1435,8 +1571,12 @@ export class JiraAssetService {
         const asset = await this.getAssetFromJira(equipment.jiraAssetId);
         const objectTypeName = asset.objectType.name;
 
-        // 2. Récupérer les définitions d'attributs pour ce type (pour la détection par nom)
-        const attributesMap = await this.getObjectTypeAttributes(objectTypeName);
+        // 2. Récupérer les définitions d'attributs COMPLÈTES pour ce type (pour la détection par type)
+        const attributesDetails = await this.getObjectTypeAttributesDetails(objectTypeName);
+
+        // Reconstruire la map simple (ID -> Nom) pour detectAttributeIds
+        const attributesMap: Record<string, string> = {};
+        attributesDetails.forEach((attr: any) => { attributesMap[attr.id] = attr.name; });
 
         // 3. Utiliser la méthode de détection existante
         const detected = this.detectAttributeIds(asset, attributesMap);
@@ -1445,6 +1585,27 @@ export class JiraAssetService {
           attributeMapping.statusAttrId = detected.statusAttrId;
           this.logger.debug(`   ✅ Statut détecté: ID ${detected.statusAttrId}`);
         }
+
+        // 3b. Détecter l'attribut Utilisateur (on cherche de préférence un lien vers un Objet Asset "User")
+        // on cherche un champ qui s'appelle 'user', 'utilisateur', etc. BUT with Type=1 (Object) preference
+        const userAttribute = attributesDetails.find((a: any) =>
+          ['user', 'utilisateur', 'users', 'utilisateurs', 'collaborateur', 'employe'].includes(a.name.toLowerCase())
+        );
+
+        // Si on a plusieurs candidats, on privilégie celui de type 1 (Object) car on veut lier un Asset User
+        const objectUserAttr = attributesDetails.find((a: any) =>
+          ['user', 'utilisateur', 'users'].includes(a.name.toLowerCase()) && a.type === 1
+        );
+
+        // Si on trouve un attribut type Object, c'est celui-là qu'on veut !
+        const selectedUserAttr = objectUserAttr || userAttribute;
+
+        if (selectedUserAttr) {
+          attributeMapping.assignedUserAttrId = selectedUserAttr.id;
+          this.logger.debug(`   ✅ Utilisateur détecté: ID ${selectedUserAttr.id} (Type: ${selectedUserAttr.type}, Nom: ${selectedUserAttr.name})`);
+        }
+
+
 
         if (!attributeMapping.assignedUserAttrId && detected.assignedUserAttrId) {
           attributeMapping.assignedUserAttrId = detected.assignedUserAttrId;
@@ -1507,22 +1668,33 @@ export class JiraAssetService {
     if (attributeMapping.assignedUserAttrId) {
       const user = equipment.currentUserId as any; // Cast car populate
       if (user && user.email) {
-        // Rechercher l'utilisateur Jira par email pour obtenir son Account ID
-        let accountId = await this.findJiraUserByEmail(user.email);
+        // 1. Chercher si l'utilisateur existe dans les OBJETS Assets "Users"
+        // ATTENTION: Pour les champs de type "Object", il est souvent préférable d'utiliser l'ID interne plutôt que la Key
+        let assetUser = await this.findAssetUserByEmail(user.email, user.displayName);
+        let userId = assetUser ? assetUser.id : null;
 
-        // Si non trouvé, essayer de créer
-        if (!accountId) {
-          accountId = await this.createJiraUser(user.email, user.displayName || user.email.split('@')[0]);
+        // 2. Si non trouvé, le créer dans Assets
+        if (!userId) {
+          const newUserObj = await this.createAssetUser({
+            email: user.email,
+            firstName: user.firstName || user.displayName?.split(' ')[0] || '',
+            lastName: user.lastName || user.displayName?.split(' ').slice(1).join(' ') || '',
+            displayName: user.displayName || user.email
+          });
+          if (newUserObj) {
+            userId = newUserObj.id;
+          }
         }
 
-        if (accountId) {
+        if (userId) {
+          // L'attribut "Utilisateur" dans Laptop attend une référence à un objet Users
           attributes.push({
             objectTypeAttributeId: attributeMapping.assignedUserAttrId,
-            objectAttributeValues: [{ value: accountId }],
+            objectAttributeValues: [{ value: userId }], // Utilisation de l'ID interne
           });
-          this.logger.debug(`📤 Payload mise à jour Jira (User): Email=${user.email} -> AccountId=${accountId} (AttrID=${attributeMapping.assignedUserAttrId})`);
+          this.logger.debug(`📤 Payload mise à jour Jira (User): Email=${user.email} -> AssetID=${userId} (AttrID=${attributeMapping.assignedUserAttrId})`);
         } else {
-          this.logger.warn(`⚠️ Utilisateur ${user.email} non trouvé et impossible à créer dans Jira. L'affectation dans Jira sera ignorée.`);
+          this.logger.warn(`⚠️ Utilisateur ${user.email} introuvable et création échouée dans Assets. L'affectation sera ignorée.`);
         }
       } else {
         // Libérer l'utilisateur dans Jira
@@ -1539,11 +1711,11 @@ export class JiraAssetService {
       const validAttributes = attributes.filter(a => a.objectTypeAttributeId);
 
       if (validAttributes.length === 0) {
-        this.logger.warn(`⚠️ Aucun attribut valide à mettre à jour pour l'équipement ${equipment.serialNumber}`);
+        this.logger.warn(`⚠️ Aucun attribut valide à mettre à jour pour l'équipement ${equipment.serialNumber}. IDs détectés: Status=${attributeMapping.statusAttrId}, User=${attributeMapping.assignedUserAttrId}`);
         return;
       }
 
-      await this.updateAssetInJira(equipment.jiraAssetId, validAttributes);
+      await this.updateAssetInJira(equipment.jiraAssetId, validAttributes as any);
       equipment.lastSyncedAt = new Date();
       await equipment.save();
       this.logger.log(`✅ Statut Jira mis à jour pour l'équipement ${equipment.serialNumber} (Status: ${this.mapEquipmentStatusToJira(equipment.status)})`);
@@ -1694,14 +1866,14 @@ export class JiraAssetService {
    */
   private mapEquipmentStatusToJira(status: EquipmentStatus): string {
     const statusMap: Record<EquipmentStatus, string> = {
-      [EquipmentStatus.DISPONIBLE]: 'En stock',
-      [EquipmentStatus.AFFECTE]: 'Affecte',
-      [EquipmentStatus.EN_REPARATION]: 'En intervention',
-      [EquipmentStatus.RESTITUE]: 'En stock',
-      [EquipmentStatus.PERDU]: 'Rebut', // Ou un autre état si "PERDU" existe
-      [EquipmentStatus.DETRUIT]: 'Rebut',
+      [EquipmentStatus.DISPONIBLE]: 'EN STOCK',
+      [EquipmentStatus.AFFECTE]: 'AFFECTE', // Majuscule, sans accent (selon screenshot)
+      [EquipmentStatus.EN_REPARATION]: 'EN INTERVENTION',
+      [EquipmentStatus.RESTITUE]: 'EN STOCK',
+      [EquipmentStatus.PERDU]: 'REBUT',
+      [EquipmentStatus.DETRUIT]: 'REBUT',
     };
 
-    return statusMap[status] || 'En stock';
+    return statusMap[status] || 'EN STOCK';
   }
 }

@@ -8,19 +8,22 @@ import { CreateAllocationDto } from './dto/create-allocation.dto';
 import { UpdateAllocationDto } from './dto/update-allocation.dto';
 import { SearchAllocationDto } from './dto/search-allocation.dto';
 import { SignAllocationDto } from './dto/sign-allocation.dto';
+import { JiraAssetService } from '../jira-asset/jira-asset.service';
 
 @Injectable()
 export class AllocationsService {
   private readonly logger = new Logger(AllocationsService.name);
-  private jiraAssetService: any = null; // Injection optionnelle pour éviter les dépendances circulaires
+  private jiraAssetService: JiraAssetService | null = null; // Injection optionnelle
 
   constructor(
     @InjectModel(Allocation.name) private allocationModel: Model<AllocationDocument>,
     @InjectModel(Equipment.name) private equipmentModel: Model<EquipmentDocument>,
     @InjectModel(User.name) private userModel: Model<UserDocument>,
-    @Optional() @Inject(forwardRef(() => 'JiraAssetService')) jiraAssetService?: any,
+    @Optional() @Inject(forwardRef(() => JiraAssetService)) private readonly injectedJiraAssetService?: JiraAssetService,
   ) {
-    this.jiraAssetService = jiraAssetService || null;
+    if (injectedJiraAssetService) {
+      this.jiraAssetService = injectedJiraAssetService;
+    }
   }
 
   /**
@@ -416,6 +419,44 @@ export class AllocationsService {
       },
       byMonth,
     };
+  }
+  /**
+   * Clôturer automatiquement une allocation active pour un équipement donné
+   * Utilisé lors de la synchronisation Jira quand un équipement revient "En stock"
+   */
+  async closeActiveAllocationForEquipment(equipmentId: string): Promise<void> {
+    try {
+      // Chercher une allocation active contenant cet équipement
+      const allocation = await this.allocationModel.findOne({
+        status: AllocationStatus.EN_COURS,
+        'equipments.equipmentId': new Types.ObjectId(equipmentId),
+      }).exec();
+
+      if (!allocation) {
+        // Pas d'allocation active, rien à faire
+        return;
+      }
+
+      this.logger.log(`🔄 Clôture automatique de l'allocation ${allocation._id} suite au retour en stock de l'équipement ${equipmentId}`);
+
+      // Mettre à jour le statut
+      allocation.status = AllocationStatus.TERMINEE;
+
+      // Ajouter une note explicative
+      const autoNote = `[AUTO] Clôture automatique le ${new Date().toLocaleString('fr-FR')} suite à la détection du statut "En stock" dans Jira.`;
+      allocation.notes = allocation.notes ? `${allocation.notes}\n${autoNote}` : autoNote;
+
+      // Marquer comme rendu ce jour
+      // Note: On pourrait aussi mettre à jour la date de fin réelle si on avait un champ pour ça
+      // Pour l'instant, le passage à TERMINEE suffit
+
+      await allocation.save();
+      this.logger.log(`✅ Allocation ${allocation._id} clôturée avec succès`);
+
+    } catch (error: any) {
+      this.logger.error(`❌ Erreur lors de la clôture automatique de l'allocation pour l'équipement ${equipmentId}: ${error.message}`);
+      // Ne pas bloquer le processus appelant
+    }
   }
 }
 
