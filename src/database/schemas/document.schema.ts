@@ -13,6 +13,7 @@ export enum DocumentStatus {
   SIGNED = 'signed',
   CANCELLED = 'cancelled',
   ARCHIVED = 'archived',
+  TERMINEE = 'terminee',
 }
 
 @Schema({ timestamps: true })

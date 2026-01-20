@@ -3,6 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { User, UserDocument } from '../database/schemas/user.schema';
 import { GraphService } from '../auth/services/graph.service';
+import { PdfGeneratorService } from '../pdf-generator/pdf-generator.service';
 import { CreateEmployeeDto } from './dto/create-employee.dto';
 import { UpdateEmployeeDto } from './dto/update-employee.dto';
 import { SearchEmployeeDto } from './dto/search-employee.dto';
@@ -14,6 +15,7 @@ export class EmployeesService {
   constructor(
     @InjectModel(User.name) private userModel: Model<UserDocument>,
     private graphService: GraphService,
+    private pdfGeneratorService: PdfGeneratorService,
   ) { }
 
   /**
@@ -303,6 +305,26 @@ export class EmployeesService {
       throw new NotFoundException(`Employé avec l'ID ${id} non trouvé`);
     }
     return employee;
+  }
+
+  /**
+   * Obtenir les documents d'un employé
+   */
+  async getDocuments(id: string) {
+    const employee = await this.findOne(id);
+    const documents = employee.documents || [];
+
+    // Signer les URLs pour les documents Azure
+    return documents.map(doc => {
+      const docObj = (doc as any).toObject ? (doc as any).toObject() : doc;
+      if (docObj.url && docObj.url.includes('dotation.blob.core.windows.net')) {
+        return {
+          ...docObj,
+          url: this.pdfGeneratorService.getSasUrl(docObj.url)
+        };
+      }
+      return docObj;
+    });
   }
 
   /**

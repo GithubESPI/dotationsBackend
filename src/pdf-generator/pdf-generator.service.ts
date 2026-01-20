@@ -4,7 +4,7 @@ import { Connection } from 'mongoose';
 import PDFDocument from 'pdfkit';
 import * as QRCode from 'qrcode';
 import { GridFSBucket } from 'mongodb';
-import { BlobServiceClient } from '@azure/storage-blob';
+import { BlobServiceClient, StorageSharedKeyCredential, generateBlobSASQueryParameters, BlobSASPermissions } from '@azure/storage-blob';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { DocumentModel, DocumentDocument, DocumentType, DocumentStatus } from '../database/schemas/document.schema';
@@ -632,6 +632,55 @@ export class PdfGeneratorService {
       filename: document.filename,
       size: document.fileSize,
     };
+  }
+
+  /**
+   * Générer une URL signée (SAS) pour un blob Azure
+   */
+  getSasUrl(blobUrl: string): string {
+    try {
+      if (!blobUrl || !blobUrl.includes('dotation.blob.core.windows.net')) {
+        return blobUrl;
+      }
+
+      const connectionString = process.env.AZURE_STORAGE_CONNECTION_STRING;
+      if (!connectionString) return blobUrl;
+
+      // Extraire le nom du conteneur et du blob depuis l'URL
+      // URL format: https://<account>.blob.core.windows.net/<container>/<blob>
+      const url = new URL(blobUrl);
+      const pathParts = url.pathname.split('/').filter(p => p);
+      if (pathParts.length < 2) return blobUrl;
+
+      const containerName = pathParts[0];
+      const blobName = pathParts.slice(1).join('/');
+
+      // Extraire account name et key de la connection string
+      const accountNameMatch = connectionString.match(/AccountName=([^;]+)/);
+      const accountKeyMatch = connectionString.match(/AccountKey=([^;]+)/);
+
+      if (!accountNameMatch || !accountKeyMatch) return blobUrl;
+
+      const accountName = accountNameMatch[1];
+      const accountKey = accountKeyMatch[1];
+
+      const sharedKeyCredential = new StorageSharedKeyCredential(accountName, accountKey);
+
+      const sasOptions = {
+        containerName,
+        blobName,
+        permissions: BlobSASPermissions.parse('r'), // Read only
+        startsOn: new Date(),
+        expiresOn: new Date(new Date().valueOf() + 3600 * 1000), // 1 heure
+      };
+
+      const sasToken = generateBlobSASQueryParameters(sasOptions, sharedKeyCredential).toString();
+
+      return `${blobUrl}?${sasToken}`;
+    } catch (error) {
+      this.logger.error(`Erreur génération SAS token: ${error.message}`);
+      return blobUrl;
+    }
   }
 }
 

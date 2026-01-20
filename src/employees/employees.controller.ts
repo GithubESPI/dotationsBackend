@@ -78,6 +78,30 @@ export class EmployeesController {
     return this.employeesService.findOne(id);
   }
 
+  @Get(':id/documents')
+  @ApiOperation({ summary: 'Obtenir les documents d\'un employé (dotations, restitutions)' })
+  @ApiParam({ name: 'id', description: 'ID MongoDB de l\'employé' })
+  @ApiResponse({
+    status: 200,
+    description: 'Liste des documents',
+    schema: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['dotation', 'restitution'] },
+          url: { type: 'string' },
+          name: { type: 'string' },
+          createdAt: { type: 'string', format: 'date-time' },
+        },
+      },
+    },
+  })
+  @ApiResponse({ status: 404, description: 'Employé non trouvé' })
+  async getDocuments(@Param('id') id: string) {
+    return this.employeesService.getDocuments(id);
+  }
+
   @Post('sync')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({

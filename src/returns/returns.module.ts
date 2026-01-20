@@ -6,6 +6,8 @@ import { Return, ReturnSchema } from '../database/schemas/return.schema';
 import { Allocation, AllocationSchema } from '../database/schemas/allocation.schema';
 import { Equipment, EquipmentSchema } from '../database/schemas/equipment.schema';
 import { User, UserSchema } from '../database/schemas/user.schema';
+import { DocumentModel, DocumentSchema } from '../database/schemas/document.schema';
+import { JiraAssetModule } from '../jira-asset/jira-asset.module';
 
 @Module({
   imports: [
@@ -14,11 +16,13 @@ import { User, UserSchema } from '../database/schemas/user.schema';
       { name: Allocation.name, schema: AllocationSchema },
       { name: Equipment.name, schema: EquipmentSchema },
       { name: User.name, schema: UserSchema },
+      { name: DocumentModel.name, schema: DocumentSchema },
     ]),
+    JiraAssetModule,
   ],
   controllers: [ReturnsController],
   providers: [ReturnsService],
   exports: [ReturnsService], // Export pour utilisation dans d'autres modules (pdf-generator)
 })
-export class ReturnsModule {}
+export class ReturnsModule { }
 

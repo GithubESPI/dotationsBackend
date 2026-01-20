@@ -5,9 +5,11 @@ import { Return, ReturnDocument } from '../database/schemas/return.schema';
 import { Allocation, AllocationDocument } from '../database/schemas/allocation.schema';
 import { Equipment, EquipmentDocument, EquipmentStatus } from '../database/schemas/equipment.schema';
 import { User, UserDocument } from '../database/schemas/user.schema';
+import { DocumentModel, DocumentDocument, DocumentStatus, DocumentType } from '../database/schemas/document.schema';
 import { CreateReturnDto } from './dto/create-return.dto';
 import { SearchReturnDto } from './dto/search-return.dto';
 import { SignReturnDto, SignerRole } from './dto/sign-return.dto';
+import { JiraAssetService } from '../jira-asset/jira-asset.service';
 
 @Injectable()
 export class ReturnsService {
@@ -18,7 +20,9 @@ export class ReturnsService {
     @InjectModel(Allocation.name) private allocationModel: Model<AllocationDocument>,
     @InjectModel(Equipment.name) private equipmentModel: Model<EquipmentDocument>,
     @InjectModel(User.name) private userModel: Model<UserDocument>,
-  ) {}
+    @InjectModel(DocumentModel.name) private documentModel: Model<DocumentDocument>,
+    private readonly jiraAssetService: JiraAssetService,
+  ) { }
 
   /**
    * Créer une nouvelle restitution
@@ -57,15 +61,15 @@ export class ReturnsService {
     const validEquipmentIds = returnEquipmentIds.filter(
       id => id && id.trim() !== '' && Types.ObjectId.isValid(id)
     );
-    
+
     if (validEquipmentIds.length === 0) {
       throw new BadRequestException('Aucun matériel valide fourni');
     }
-    
+
     if (validEquipmentIds.length !== returnEquipmentIds.length) {
       throw new BadRequestException('Un ou plusieurs IDs de matériel sont invalides');
     }
-    
+
     const equipments = await this.equipmentModel.find({
       _id: { $in: validEquipmentIds.map(id => new Types.ObjectId(id)) },
     }).exec();
@@ -106,11 +110,41 @@ export class ReturnsService {
       equipment.status = EquipmentStatus.RESTITUE;
       equipment.currentUserId = undefined; // Libérer le matériel
       await equipment.save();
+
+      // Mettre à jour Jira automatiquement si l'équipement est lié
+      if (equipment.jiraAssetId) {
+        try {
+          this.logger.debug(`🔄 Mise à jour Jira pour l'équipement ${equipment.serialNumber} (Retour en stock)`);
+          await this.jiraAssetService.updateEquipmentStatusInJira(equipment._id.toString(), {
+            statusAttrId: undefined, // Sera détecté automatiquement
+            assignedUserAttrId: undefined, // Sera détecté automatiquement
+          });
+          this.logger.debug(`✅ Jira mis à jour pour ${equipment.serialNumber}`);
+        } catch (error: any) {
+          this.logger.warn(`⚠️ Impossible de mettre à jour Jira pour ${equipment.serialNumber}: ${error.message}`);
+        }
+      }
     }
 
     // Mettre à jour le statut de l'allocation
     allocation.status = 'terminee' as any;
     await allocation.save();
+
+    // Mettre à jour le statut du document de dotation associé
+    if (allocation.documentId) {
+      await this.documentModel.findByIdAndUpdate(allocation.documentId, {
+        status: DocumentStatus.TERMINEE
+      }).exec();
+    } else {
+      // Fallback: chercher le document si l'ID n'est pas dans l'allocation
+      await this.documentModel.findOneAndUpdate(
+        {
+          allocationId: allocation._id,
+          documentType: DocumentType.DOTATION
+        },
+        { status: DocumentStatus.TERMINEE }
+      ).exec();
+    }
 
     this.logger.log(`✅ Restitution créée: ${savedReturn._id} pour ${user.displayName}`);
 
