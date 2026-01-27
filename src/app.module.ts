@@ -11,6 +11,8 @@ import { ReturnsModule } from './returns/returns.module';
 import { PdfGeneratorModule } from './pdf-generator/pdf-generator.module';
 import { JiraAssetModule } from './jira-asset/jira-asset.module';
 import { DatabaseModule } from './database/database.module';
+import { ScheduleModule } from '@nestjs/schedule';
+import { SchedulerModule } from './scheduler/scheduler.module';
 
 @Module({
   imports: [
@@ -27,8 +29,10 @@ import { DatabaseModule } from './database/database.module';
     ReturnsModule,
     PdfGeneratorModule,
     JiraAssetModule,
+    ScheduleModule.forRoot(),
+    SchedulerModule,
   ],
   controllers: [AppController],
   providers: [AppService],
 })
-export class AppModule {}
+export class AppModule { }

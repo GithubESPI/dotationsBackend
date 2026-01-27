@@ -20,7 +20,7 @@ export interface GraphUser {
 export class GraphService {
   private readonly graphApiBaseUrl = 'https://graph.microsoft.com/v1.0';
 
-  constructor(private configService: ConfigService) {}
+  constructor(private configService: ConfigService) { }
 
   /**
    * Récupère les informations de l'utilisateur depuis Microsoft Graph API
@@ -56,10 +56,10 @@ export class GraphService {
    */
   async getUserPhoto(accessToken: string, userId?: string): Promise<string | null> {
     try {
-      const endpoint = userId 
+      const endpoint = userId
         ? `${this.graphApiBaseUrl}/users/${userId}/photo/$value`
         : `${this.graphApiBaseUrl}/me/photo/$value`;
-      
+
       const response = await axios.get(endpoint, {
         headers: {
           Authorization: `Bearer ${accessToken}`,
@@ -89,10 +89,10 @@ export class GraphService {
    */
   async getAllUserDetails(accessToken: string, userId?: string): Promise<any> {
     try {
-      const endpoint = userId 
+      const endpoint = userId
         ? `${this.graphApiBaseUrl}/users/${userId}`
         : `${this.graphApiBaseUrl}/me`;
-      
+
       const response = await axios.get(endpoint, {
         headers: {
           Authorization: `Bearer ${accessToken}`,
@@ -185,6 +185,39 @@ export class GraphService {
       }
       console.warn('Erreur lors de la vérification du groupe:', error.message);
       return false;
+    }
+  }
+
+  /**
+   * Récupère un token d'accès application (Client Credentials Flow) pour les tâches d'arrière-plan
+   * @returns Token d'accès application
+   */
+  async getApplicationAccessToken(): Promise<string> {
+    const tenantId = this.configService.get<string>('AZURE_AD_TENANT_ID');
+    const clientId = this.configService.get<string>('AZURE_AD_CLIENT_ID');
+    const clientSecret = this.configService.get<string>('AZURE_AD_CLIENT_SECRET');
+
+    if (!tenantId || !clientId || !clientSecret) {
+      throw new Error('Les identifiants Azure AD (Tenant, Client ID, Client Secret) ne sont pas configurés.');
+    }
+
+    const tokenUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`;
+    const params = new URLSearchParams();
+    params.append('client_id', clientId);
+    params.append('client_secret', clientSecret);
+    params.append('scope', 'https://graph.microsoft.com/.default');
+    params.append('grant_type', 'client_credentials');
+
+    try {
+      const response = await axios.post(tokenUrl, params, {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      });
+      return response.data.access_token;
+    } catch (error: any) {
+      console.error('Erreur lors de la récupération du token application:', error.response?.data || error.message);
+      throw new UnauthorizedException('Impossible de récupérer le token d\'application Azure AD');
     }
   }
 }
