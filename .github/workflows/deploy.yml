@@ -2,7 +2,7 @@ name: Deploy to Ubuntu Server
 
 on:
   push:
-    branches: [ main ]  # Déclenche le déploiement sur push vers main
+    branches: [ main ]  # Déclenche  le déploiement sur push vers main
 
 jobs:
   deploy:
