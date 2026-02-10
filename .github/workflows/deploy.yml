@@ -1,0 +1,38 @@
+name: Deploy to Ubuntu Server
+
+on:
+  push:
+    branches: [ main ]  # Déclenche le déploiement sur push vers main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Server via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          port: 22
+          script: |
+            # On va dans le dossier du projet
+            cd /home/userDotation/dossier-backend
+            
+            # On récupère les modifs
+            git pull origin main
+            
+            # On installe les nouvelles dépendances s'il y en a
+            npm install
+            
+            # On recompile le projet NestJS
+            npm run build
+            
+            # On redémarre le processus PM2
+            # Utilise 'npx pm2' pour être sûr du chemin
+            npx pm2 restart backend-nest
+            
+            echo "Deployment successful! 🚀"
