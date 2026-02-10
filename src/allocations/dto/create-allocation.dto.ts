@@ -38,7 +38,7 @@ export class CreateAllocationDto {
   @IsNotEmpty()
   userId: string;
 
-  @ApiProperty({ 
+  @ApiProperty({
     description: 'Liste des matériels à doter',
     type: [EquipmentItemDto],
     minItems: 1,
@@ -74,5 +74,10 @@ export class CreateAllocationDto {
   @IsOptional()
   @IsString()
   notes?: string;
+
+  @ApiPropertyOptional({ description: 'Statut de l\'allocation', enum: ['EN_COURS', 'TERMINEE', 'EN_RETARD', 'ANNULEE'] })
+  @IsOptional()
+  @IsString()
+  status?: string;
 }
 

@@ -372,7 +372,7 @@ export class AllocationsService {
     };
 
     allocation.signedAt = new Date();
-    allocation.status = AllocationStatus.TERMINEE;
+    allocation.status = AllocationStatus.EN_COURS;
 
     return allocation.save();
   }
