@@ -612,7 +612,7 @@ export class PdfGeneratorService {
     if (!db) {
       throw new Error('MongoDB database connection is not available');
     }
-    return new GridFSBucket(db, { bucketName: 'documents' });
+    return new GridFSBucket(db as any, { bucketName: 'documents' });
   }
 
   /**
