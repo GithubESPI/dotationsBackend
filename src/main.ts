@@ -22,11 +22,20 @@ async function bootstrap() {
     }),
   );
 
-  // Configuration CORS
+  // Configuration CORS améliorée
+  const allowedOrigins = (process.env.FRONTEND_URL || '').split(',').map(url => url.trim());
+  // Ajout manuel de localhost pour être sûr
+  if (!allowedOrigins.includes('http://localhost:3001')) {
+    allowedOrigins.push('http://localhost:3001');
+  }
+
   app.enableCors({
-    origin: process.env.FRONTEND_URL || 'http://localhost:3001',
+    origin: allowedOrigins.length > 0 ? allowedOrigins : 'http://localhost:3001',
     credentials: true,
+    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
+    allowedHeaders: 'Content-Type, Accept, Authorization',
   });
+
 
   // Validation globale
   app.useGlobalPipes(
