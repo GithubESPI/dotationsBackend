@@ -240,14 +240,13 @@ export class AuthController {
         req.session.userId = req.user.id;
       }
       
-      // Rediriger vers le frontend avec le token JWT et le token Azure AD
+      // Rediriger vers le frontend avec uniquement le token JWT
+      // Note: azure_token exclu de l'URL car trop long (8000+ chars) → 431 sur Azure App Service
+      // Le token Azure est déjà stocké en session côté backend si besoin
       const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3001';
       const params = new URLSearchParams({
         token: result.access_token,
       });
-      if (result.azure_access_token) {
-        params.append('azure_token', result.azure_access_token);
-      }
       const redirectUrl = `${frontendUrl}/callback?${params.toString()}`;
       
       console.log(`🔄 Redirection vers: ${frontendUrl}/callback`);
