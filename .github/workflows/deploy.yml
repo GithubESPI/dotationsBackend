@@ -31,8 +31,8 @@ jobs:
             # On recompile le projet NestJS
             npm run build
             
-            # On redémarre le processus PM2
-            # Utilise 'npx pm2' pour être sûr du chemin
-            npx pm2 restart backend-nest
+            # On redémarre le processus PM2 avec rechargement complet des variables d'env
+            # startOrRestart : démarre si absent, redémarre si déjà en cours + relit ecosystem.config.js
+            npx pm2 startOrRestart ecosystem.config.js --update-env
             
             echo "Deployment successful! 🚀"

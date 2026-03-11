@@ -74,7 +74,9 @@ export class AzureADGuard extends AuthGuard('azure-ad') {
           this.logger.error('   1. AZURE_AD_CLIENT_SECRET incorrect ou expiré');
           this.logger.error('   2. URL de redirection ne correspond pas exactement à celle dans Azure Portal');
           this.logger.error('   3. Le code d\'autorisation a expiré (les codes expirent rapidement)');
-          this.logger.error(`   Redirect URI configuré: ${process.env.AZURE_AD_REDIRECT_URI || 'http://localhost:3000/auth/azure-ad/callback'}`);
+          const _envR = process.env.AZURE_AD_REDIRECT_URI;
+          const _resolvedUri = _envR && _envR.includes(',') ? _envR.split(',')[0].trim() : _envR || 'http://localhost:3000/auth/azure-ad/callback';
+          this.logger.error(`   Redirect URI configuré: ${_resolvedUri}`);
           this.logger.error(`   Code reçu: ${request.query?.code ? request.query.code.substring(0, 50) + '...' : 'aucun'}`);
         }
       }

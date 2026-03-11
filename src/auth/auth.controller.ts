@@ -64,9 +64,12 @@ export class AuthController {
     
     const tenantId = process.env.AZURE_AD_TENANT_ID || 'common';
     const clientID = process.env.AZURE_AD_CLIENT_ID;
-    const redirectUri = encodeURIComponent(
-      process.env.AZURE_AD_REDIRECT_URI || 'http://localhost:3000/auth/azure-ad/callback'
-    );
+    const envRedirect = process.env.AZURE_AD_REDIRECT_URI;
+    const resolvedRedirectUri =
+      envRedirect && envRedirect.includes(',')
+        ? envRedirect.split(',')[0].trim()
+        : envRedirect || 'http://localhost:3000/auth/azure-ad/callback';
+    const redirectUri = encodeURIComponent(resolvedRedirectUri);
     const scopes = encodeURIComponent('openid profile email User.Read offline_access');
     const state = Math.random().toString(36).substring(7); // Générer un state aléatoire
     
@@ -192,7 +195,11 @@ export class AuthController {
         });
         
         // Vérifier la configuration
-        const redirectUri = process.env.AZURE_AD_REDIRECT_URI || 'http://localhost:3000/auth/azure-ad/callback';
+        const envRedirect2 = process.env.AZURE_AD_REDIRECT_URI;
+        const redirectUri =
+          envRedirect2 && envRedirect2.includes(',')
+            ? envRedirect2.split(',')[0].trim()
+            : envRedirect2 || 'http://localhost:3000/auth/azure-ad/callback';
         const clientSecret = process.env.AZURE_AD_CLIENT_SECRET;
         console.error('   Configuration vérifiée:');
         console.error(`   - Redirect URI: ${redirectUri}`);
