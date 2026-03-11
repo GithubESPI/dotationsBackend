@@ -17,7 +17,11 @@ export class AzureADStrategy extends PassportStrategy(OIDCStrategy as any, 'azur
 
     const clientID = configService.get<string>('AZURE_AD_CLIENT_ID');
     const clientSecret = configService.get<string>('AZURE_AD_CLIENT_SECRET');
-    const redirectUri = configService.get<string>('AZURE_AD_REDIRECT_URI');
+    const envRedirect = configService.get<string>('AZURE_AD_REDIRECT_URI');
+    const redirectUri =
+      envRedirect && envRedirect.includes(',')
+        ? envRedirect.split(',')[0].trim()
+        : envRedirect || 'http://localhost:3000/auth/azure-ad/callback';
 
     // Validation des paramètres requis
     if (!clientID || clientID.trim() === '') {
