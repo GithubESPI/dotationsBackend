@@ -9,7 +9,7 @@ export class AzureADStrategy extends PassportStrategy(OIDCStrategy as any, 'azur
   constructor(private configService: ConfigService) {
     // IMPORTANT: Utiliser le Tenant ID spécifique (pas 'common') pour limiter l'accès aux utilisateurs du tenant
     const tenantId = configService.get<string>('AZURE_AD_TENANT_ID');
-    
+
     if (!tenantId || tenantId === 'common') {
       console.warn('⚠️  ATTENTION: AZURE_AD_TENANT_ID n\'est pas configuré ou est défini sur "common".');
       console.warn('   Pour limiter l\'accès aux utilisateurs du tenant, configurez un Tenant ID spécifique.');
@@ -17,7 +17,7 @@ export class AzureADStrategy extends PassportStrategy(OIDCStrategy as any, 'azur
 
     const clientID = configService.get<string>('AZURE_AD_CLIENT_ID');
     const clientSecret = configService.get<string>('AZURE_AD_CLIENT_SECRET');
-    const redirectUri = configService.get<string>('AZURE_AD_REDIRECT_URI') || 'http://localhost:3000/auth/azure-ad/callback';
+    const redirectUri = configService.get<string>('AZURE_AD_REDIRECT_URI');
 
     // Validation des paramètres requis
     if (!clientID || clientID.trim() === '') {
@@ -98,7 +98,7 @@ export class AzureADStrategy extends PassportStrategy(OIDCStrategy as any, 'azur
 
       // Extraire l'email du profil
       const email = profile.upn || (profile.emails && Array.isArray(profile.emails) && profile.emails[0]) || '';
-      
+
       // Vérifier que l'email appartient au domaine autorisé (optionnel)
       const allowedDomain = configService.get<string>('AZURE_AD_ALLOWED_DOMAIN');
       if (allowedDomain && email && !email.endsWith(`@${allowedDomain}`)) {
