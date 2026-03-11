@@ -16,12 +16,14 @@ async function bootstrap() {
   app.use(
     session({
       secret: process.env.SESSION_SECRET || 'your-session-secret-change-in-production',
-      resave: false,
-      saveUninitialized: false,
+      resave: true,              // Forcer la sauvegarde à chaque requête
+      saveUninitialized: true,   // Créer la session immédiatement (crucial pour OAuth)
+      proxy: true,               // Faire confiance au proxy nginx pour les cookies Secure
       cookie: {
         secure: process.env.NODE_ENV === 'production', // HTTPS en production
         httpOnly: true,
         maxAge: 24 * 60 * 60 * 1000, // 24 heures
+        sameSite: 'lax',             // Requis pour les redirects OAuth cross-domain
       },
     }),
   );
