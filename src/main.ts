@@ -8,6 +8,10 @@ import { AuthExceptionFilter } from './auth/filters/auth-exception.filter';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
+  // Faire confiance au reverse proxy (nginx) pour lire le bon protocole (https)
+  // Sans cela, req.protocol retourne 'http' au lieu de 'https' → mismatch URL OAuth
+  app.getHttpAdapter().getInstance().set('trust proxy', 1);
+
   // Configuration des sessions (requis pour passport-azure-ad)
   app.use(
     session({
