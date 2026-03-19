@@ -35,13 +35,22 @@ export class AuthService {
     };
   }
 
-  async login(user: UserPayload, azureAccessToken?: string) {
+  async login(user: UserPayload & { profile?: any }, azureAccessToken?: string) {
     // Si on a un access token Azure AD, récupérer les données depuis Microsoft Graph
     let graphUserData: any = null;
+    let userRoles = [...(user.roles || [])];
+    
+    // Récupérer les groupes inclus directement dans le profil Azure AD (si configuré)
+    let allGroups: string[] = [
+      ...userRoles,
+      ...(user.profile?._json?.groups || []),
+      ...(user.profile?.groups || [])
+    ];
+
     if (azureAccessToken) {
       try {
         const graphProfile = await this.graphService.getUserProfile(azureAccessToken);
-        // Récupérer aussi la photo et les groupes
+        // Récupérer aussi la photo et les groupes depuis Graph API
         const [photo, groups] = await Promise.all([
           this.graphService.getUserPhoto(azureAccessToken),
           this.graphService.getUserGroups(azureAccessToken),
@@ -52,9 +61,26 @@ export class AuthService {
           photo,
           groups,
         };
+
+        if (groups && Array.isArray(groups)) {
+          allGroups.push(...groups);
+        }
       } catch (error) {
-        console.warn('Impossible de récupérer les données Graph:', error);
-        // On continue même si Graph API échoue
+        console.warn('Impossible de récupérer completement les données Graph (permissions manquantes?)', error);
+      }
+    }
+
+    // Afficher les groupes pour le debuggage serveur
+    console.log(`[AUTH] Groupes identifiés pour ${user.email} :`, allGroups);
+
+    // Si l'utilisateur appartient au groupe DSIT -2SRT (par nom ou ID), lui donner le rôle d'admin DSIT
+    const dsitGroupId = 'c571c975-78ba-4dab-8dbe-161eb441366e';
+    const dsitGroupName = 'DSIT -2SRT';
+    
+    if (allGroups.some(g => typeof g === 'string' && (g === dsitGroupId || g === dsitGroupName || g.includes('DSIT -2SRT')))) {
+      if (!userRoles.includes('DSIT_ADMIN')) {
+        console.log(`[AUTH] Rôle DSIT_ADMIN attribué à ${user.email}`);
+        userRoles.push('DSIT_ADMIN');
       }
     }
 
@@ -62,7 +88,7 @@ export class AuthService {
       sub: user.id,
       email: user.email,
       name: user.name,
-      roles: user.roles,
+      roles: userRoles,
     };
 
     return {
@@ -72,7 +98,7 @@ export class AuthService {
         id: user.id,
         email: user.email,
         name: user.name,
-        roles: user.roles,
+        roles: userRoles,
         graphData: graphUserData,
       },
     };
