@@ -158,7 +158,7 @@ export class AllocationsService {
     // CORRECTIF: Si le statut est DISPONIBLE ou EN_REPARATION, on considère que c'est bon
     // Cela permet de réaffecter un équipement qui revient de réparation
     const unavailableEquipments = equipments.filter(
-      eq => eq.status !== EquipmentStatus.DISPONIBLE && eq.status !== EquipmentStatus.EN_REPARATION
+      eq => eq.status !== EquipmentStatus.EN_STOCK && eq.status !== EquipmentStatus.EN_REPARATION
     );
 
     if (unavailableEquipments.length > 0) {

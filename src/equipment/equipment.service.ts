@@ -40,7 +40,7 @@ export class EquipmentService {
 
     const equipment = new this.equipmentModel({
       ...createDto,
-      status: createDto.status || EquipmentStatus.DISPONIBLE,
+      status: createDto.status || EquipmentStatus.EN_STOCK,
     });
 
     return equipment.save();
@@ -157,7 +157,7 @@ export class EquipmentService {
   async findAvailable(): Promise<EquipmentDocument[]> {
     return this.equipmentModel
       .find({
-        status: EquipmentStatus.DISPONIBLE,
+        status: EquipmentStatus.EN_STOCK,
         currentUserId: null,
       })
       .sort({ brand: 1, model: 1 })
@@ -205,7 +205,7 @@ export class EquipmentService {
   async assignToUser(equipmentId: string, userId: string, jiraConfig?: { statusAttrId: string; assignedUserAttrId?: string }): Promise<EquipmentDocument> {
     const equipment = await this.findOne(equipmentId);
 
-    if (equipment.status !== EquipmentStatus.DISPONIBLE) {
+    if (equipment.status !== EquipmentStatus.EN_STOCK) {
       throw new BadRequestException(
         `Le matériel n'est pas disponible. Statut actuel: ${equipment.status}`
       );
@@ -243,7 +243,7 @@ export class EquipmentService {
     const equipment = await this.findOne(equipmentId);
 
     equipment.currentUserId = undefined;
-    equipment.status = EquipmentStatus.DISPONIBLE;
+    equipment.status = EquipmentStatus.EN_STOCK;
     const savedEquipment = await equipment.save();
 
     // Mettre à jour Jira si configuré et si le service est disponible
@@ -295,7 +295,7 @@ export class EquipmentService {
       byBrand,
     ] = await Promise.all([
       this.equipmentModel.countDocuments().exec(),
-      this.equipmentModel.countDocuments({ status: EquipmentStatus.DISPONIBLE }).exec(),
+      this.equipmentModel.countDocuments({ status: EquipmentStatus.EN_STOCK }).exec(),
       this.equipmentModel.countDocuments({ status: EquipmentStatus.AFFECTE }).exec(),
       this.equipmentModel.countDocuments({ status: EquipmentStatus.EN_REPARATION }).exec(),
       this.equipmentModel.countDocuments({ status: EquipmentStatus.RESTITUE }).exec(),

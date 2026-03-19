@@ -46,7 +46,7 @@ export class CreateEquipmentDto {
   @ApiPropertyOptional({ 
     description: 'Statut du matériel',
     enum: EquipmentStatus,
-    default: EquipmentStatus.DISPONIBLE,
+    default: EquipmentStatus.EN_STOCK,
   })
   @IsOptional()
   @IsEnum(EquipmentStatus)

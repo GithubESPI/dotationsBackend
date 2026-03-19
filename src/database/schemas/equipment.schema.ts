@@ -14,7 +14,7 @@ export enum EquipmentType {
 }
 
 export enum EquipmentStatus {
-  DISPONIBLE = 'disponible',
+  EN_STOCK = 'en_stock',         // "En stock" dans Jira (remplace DISPONIBLE)
   AFFECTE = 'affecte',
   EN_REPARATION = 'en_reparation',
   RESTITUE = 'restitue',
@@ -48,7 +48,7 @@ export class Equipment {
   @Prop()
   phoneLine?: string; // N° de ligne téléphonique
 
-  @Prop({ default: EquipmentStatus.DISPONIBLE, enum: EquipmentStatus })
+  @Prop({ default: EquipmentStatus.EN_STOCK, enum: EquipmentStatus })
   status: EquipmentStatus;
 
   @Prop({ type: Types.ObjectId, ref: 'User', default: null })

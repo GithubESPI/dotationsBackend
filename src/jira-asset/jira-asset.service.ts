@@ -1,4 +1,4 @@
-﻿import { Injectable, Logger, BadRequestException, NotFoundException, Inject, forwardRef, Optional } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, NotFoundException, Inject, forwardRef, Optional } from '@nestjs/common';
 import { AllocationsService } from '../allocations/allocations.service';
 import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
@@ -1399,7 +1399,7 @@ export class JiraAssetService {
       model: model || 'Inconnu',
       type: equipmentType,
       jiraAssetId,
-      status: this.mapJiraStatusToEquipmentStatus(status) || EquipmentStatus.DISPONIBLE,
+      status: this.mapJiraStatusToEquipmentStatus(status) || EquipmentStatus.EN_STOCK,
       jiraAttributes, // Sauvegarder tous les attributs Jira
     };
 
@@ -1439,7 +1439,7 @@ export class JiraAssetService {
     }
 
     // Gestion automatique des allocations: Si l'équipement est disponible ("En stock"), on clôture les allocations en cours
-    if (equipmentData.status === EquipmentStatus.DISPONIBLE && this.allocationsService) {
+    if (equipmentData.status === EquipmentStatus.EN_STOCK && this.allocationsService) {
       await this.allocationsService.closeActiveAllocationForEquipment(equipment._id.toString());
     }
 
@@ -1838,27 +1838,28 @@ export class JiraAssetService {
     if (!jiraStatus) return undefined;
 
     const statusMap: Record<string, EquipmentStatus> = {
-      'disponible': EquipmentStatus.DISPONIBLE,
-      'available': EquipmentStatus.DISPONIBLE,
-      'en stock': EquipmentStatus.DISPONIBLE, // Status Jira spécifique
+      // Statuts réels dans Jira
+      'en stock': EquipmentStatus.EN_STOCK,
+      'disponible': EquipmentStatus.EN_STOCK,  // Ancien alias
+      'available': EquipmentStatus.EN_STOCK,   // Alias anglais
       'affecté': EquipmentStatus.AFFECTE,
-      'affecte': EquipmentStatus.AFFECTE,     // Sans accent
+      'affecte': EquipmentStatus.AFFECTE,
       'assigned': EquipmentStatus.AFFECTE,
+      'en intervention': EquipmentStatus.EN_REPARATION,
       'en_reparation': EquipmentStatus.EN_REPARATION,
       'en_maintenance': EquipmentStatus.EN_REPARATION,
-      'en intervention': EquipmentStatus.EN_REPARATION, // Status Jira spécifique
       'maintenance': EquipmentStatus.EN_REPARATION,
       'repair': EquipmentStatus.EN_REPARATION,
       'restitue': EquipmentStatus.RESTITUE,
       'returned': EquipmentStatus.RESTITUE,
       'perdu': EquipmentStatus.PERDU,
       'lost': EquipmentStatus.PERDU,
+      'rebut': EquipmentStatus.DETRUIT,
       'detruit': EquipmentStatus.DETRUIT,
       'destroyed': EquipmentStatus.DETRUIT,
-      'rebut': EquipmentStatus.DETRUIT,       // Status Jira spécifique
     };
 
-    return statusMap[jiraStatus.toLowerCase()] || EquipmentStatus.DISPONIBLE;
+    return statusMap[jiraStatus.toLowerCase()] || EquipmentStatus.EN_STOCK;
   }
 
   /**
@@ -1866,14 +1867,14 @@ export class JiraAssetService {
    */
   private mapEquipmentStatusToJira(status: EquipmentStatus): string {
     const statusMap: Record<EquipmentStatus, string> = {
-      [EquipmentStatus.DISPONIBLE]: 'EN STOCK',
-      [EquipmentStatus.AFFECTE]: 'AFFECTE', // Majuscule, sans accent (selon screenshot)
-      [EquipmentStatus.EN_REPARATION]: 'EN INTERVENTION',
-      [EquipmentStatus.RESTITUE]: 'EN STOCK',
-      [EquipmentStatus.PERDU]: 'REBUT',
-      [EquipmentStatus.DETRUIT]: 'REBUT',
+      [EquipmentStatus.EN_STOCK]: 'En stock',
+      [EquipmentStatus.AFFECTE]: 'Affecté',
+      [EquipmentStatus.EN_REPARATION]: 'En intervention',
+      [EquipmentStatus.RESTITUE]: 'En stock',
+      [EquipmentStatus.PERDU]: 'Rebut',
+      [EquipmentStatus.DETRUIT]: 'Rebut',
     };
 
-    return statusMap[status] || 'EN STOCK';
+    return statusMap[status] || 'En stock';
   }
 }
