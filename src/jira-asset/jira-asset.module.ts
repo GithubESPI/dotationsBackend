@@ -5,6 +5,7 @@ import { JiraAssetController } from './jira-asset.controller';
 import { JiraAssetService } from './jira-asset.service';
 import { Equipment, EquipmentSchema } from '../database/schemas/equipment.schema';
 import { AllocationsModule } from '../allocations/allocations.module';
+import { PdfGeneratorModule } from '../pdf-generator/pdf-generator.module';
 import { forwardRef } from '@nestjs/common';
 
 @Module({
@@ -17,6 +18,7 @@ import { forwardRef } from '@nestjs/common';
       { name: Equipment.name, schema: EquipmentSchema },
     ]),
     forwardRef(() => AllocationsModule),
+    PdfGeneratorModule, // Pour générer les PDFs lors de la synchro Jira
   ],
   controllers: [JiraAssetController],
   providers: [JiraAssetService],

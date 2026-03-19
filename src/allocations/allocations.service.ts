@@ -156,10 +156,19 @@ export class AllocationsService {
     }
 
     // CORRECTIF: Si le statut est DISPONIBLE ou EN_REPARATION, on considère que c'est bon
-    // Cela permet de réaffecter un équipement qui revient de réparation
-    const unavailableEquipments = equipments.filter(
-      eq => eq.status !== EquipmentStatus.EN_STOCK && eq.status !== EquipmentStatus.EN_REPARATION
-    );
+    // ÉGALEMENT: Si le statut est AFFECTE mais assigné au MÊME utilisateur, on l'autorise (cas de la synchro Jira rétroactive)
+    const unavailableEquipments = equipments.filter(eq => {
+      // Si en stock ou en réparation, c'est disponible
+      if (eq.status === EquipmentStatus.EN_STOCK || eq.status === EquipmentStatus.EN_REPARATION) return false;
+      
+      // Si déjà affecté à cet utilisateur exact (ex: synchro Jira qui a mis à jour l'équipement avant de créer l'allocation), on autorise
+      if (eq.status === EquipmentStatus.AFFECTE && eq.currentUserId && eq.currentUserId.toString() === createDto.userId.toString()) {
+        return false;
+      }
+      
+      // Sinon, ce n'est pas disponible
+      return true;
+    });
 
     if (unavailableEquipments.length > 0) {
       const unavailableDetails = unavailableEquipments.map(e => ({

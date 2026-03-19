@@ -1,5 +1,6 @@
 import { Injectable, Logger, BadRequestException, NotFoundException, Inject, forwardRef, Optional } from '@nestjs/common';
 import { AllocationsService } from '../allocations/allocations.service';
+import { PdfGeneratorService } from '../pdf-generator/pdf-generator.service';
 import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
@@ -65,6 +66,7 @@ export class JiraAssetService {
     private readonly httpService: HttpService,
     @InjectModel(Equipment.name) private equipmentModel: Model<EquipmentDocument>,
     @Optional() @Inject(forwardRef(() => AllocationsService)) private readonly allocationsService?: AllocationsService,
+    @Optional() private readonly pdfGeneratorService?: PdfGeneratorService,
   ) {
     // Variables pour l'API Jira classique (rétrocompatibilité)
     this.baseUrl = this.configService.get<string>('JIRA_BASE_URL') || '';
@@ -1341,6 +1343,11 @@ export class JiraAssetService {
         return val.status.name;
       }
 
+      // Gérer le cas où la valeur est un objet référencé (comme un User Asset, ou Localisation)
+      if (val.referencedObject) {
+        return val.referencedObject.name || val.referencedObject.label || val.value?.toString();
+      }
+
       return val.value?.toString();
     };
 
@@ -1376,7 +1383,15 @@ export class JiraAssetService {
     const type = getAttributeValue(attributeMapping.typeAttrId);
     const status = getAttributeValue(attributeMapping.statusAttrId);
     const internalId = getAttributeValue(attributeMapping.internalIdAttrId);
-    const assignedUserEmail = getAttributeValue(attributeMapping.assignedUserAttrId);
+    let assignedUserEmail = getAttributeValue(attributeMapping.assignedUserAttrId);
+    
+    // Fallback: si l'association a échoué (souvent parce que l'ID n'a pas pu être mappé), on lit directement par le nom
+    if (!assignedUserEmail && jiraAttributes) {
+      assignedUserEmail = jiraAttributes['user'] || jiraAttributes['User'] || jiraAttributes['Utilisateur'] || jiraAttributes['utilisateur'] || jiraAttributes['owner'];
+      if (assignedUserEmail) {
+        this.logger.debug(`💡 Utilisateur trouvé via fallback jiraAttributes: ${assignedUserEmail}`);
+      }
+    }
 
     if (!serialNumber) {
       throw new BadRequestException('Le numéro de série est requis pour synchroniser un équipement');
@@ -1409,18 +1424,33 @@ export class JiraAssetService {
 
     // Si un utilisateur est affecté dans Jira, essayer de le trouver dans MongoDB
     // Note: Cela nécessite que l'utilisateur existe déjà dans MongoDB (synchronisé depuis Office 365)
-    if (assignedUserEmail && attributeMapping.assignedUserAttrId) {
+    if (assignedUserEmail) {
       const { Model } = require('mongoose');
       const UserModel = this.equipmentModel.db.model('User');
-      const user = await UserModel.findOne({ email: assignedUserEmail }).exec();
+      
+      this.logger.debug(`🔍 Recherche de l'utilisateur M365 pour la valeur Jira: "${assignedUserEmail}"`);
+      
+      // Recherche par email exact ou par displayName (insensible à la casse)
+      const user = await UserModel.findOne({
+        $or: [
+          { email: { $regex: new RegExp(`^${assignedUserEmail}$`, 'i') } },
+          { displayName: { $regex: new RegExp(`^${assignedUserEmail}$`, 'i') } }
+        ]
+      }).exec();
+
       if (user) {
+        this.logger.debug(`✅ Utilisateur trouvé dans MongoDB: ${user.email} (${user.displayName})`);
         equipmentData.currentUserId = user._id;
-        // Si un utilisateur est affecté, le statut devrait être "affecte"
-        if (!status || status.toLowerCase() === 'disponible' || status.toLowerCase() === 'available') {
+        
+        // Si un utilisateur est affecté, le statut est "AFFECTE"
+        if (!status || status.toLowerCase() === 'disponible' || status.toLowerCase() === 'available' || status.toLowerCase() === 'en stock') {
           equipmentData.status = EquipmentStatus.AFFECTE;
         }
+
+        // Nous créerons l'allocation APRÈS la sauvegarde de l'équipement (plus bas)
+        // pour avoir l'ID MongoDB de l'équipement
       } else {
-        this.logger.warn(`⚠️ Utilisateur ${assignedUserEmail} trouvé dans Jira mais non trouvé dans MongoDB. Synchronisez d'abord les utilisateurs depuis Office 365.`);
+        this.logger.warn(`⚠️ Utilisateur "${assignedUserEmail}" trouvé dans Jira mais non trouvé dans MongoDB. Vérifier la synchronisation O365.`);
       }
     }
 
@@ -1438,9 +1468,55 @@ export class JiraAssetService {
       this.logger.log(`✅ Équipement créé depuis Jira: ${serialNumber}`);
     }
 
-    // Gestion automatique des allocations: Si l'équipement est disponible ("En stock"), on clôture les allocations en cours
-    if (equipmentData.status === EquipmentStatus.EN_STOCK && this.allocationsService) {
-      await this.allocationsService.closeActiveAllocationForEquipment(equipment._id.toString());
+    if (this.allocationsService) {
+      // Gestion de la RESTITUTION automatique
+      if (equipmentData.status === EquipmentStatus.EN_STOCK || equipmentData.status === 'disponible') {
+        await this.allocationsService.closeActiveAllocationForEquipment(equipment._id.toString());
+      }
+      
+      // Gestion de la DOTATION automatique
+      if (equipment.currentUserId && equipment.status === EquipmentStatus.AFFECTE) {
+        const AllocationModel = this.equipmentModel.db.model('Allocation');
+        
+        // Chercher une allocation active pour CET équipement
+        const activeAlloc = await AllocationModel.findOne({
+          'equipments.equipmentId': equipment._id,
+          status: { $in: ['draft', 'signed', 'delivered'] },
+        }).exec();
+
+        if (activeAlloc && activeAlloc.userId.toString() === equipment.currentUserId.toString()) {
+          this.logger.debug(`✅ Allocation déjà existante pour l'équipement ${equipment.serialNumber} et l'utilisateur ${equipment.currentUserId}`);
+        } else {
+          if (activeAlloc) {
+            this.logger.warn(`⚠️ L'équipement ${equipment.serialNumber} était alloué à un autre utilisateur, clôture de l'ancienne allocation.`);
+            await this.allocationsService.closeActiveAllocationForEquipment(equipment._id.toString());
+          }
+
+          this.logger.log(`📝 Création automatique de l'allocation (dotation) pour l'équipement ${equipment.serialNumber}`);
+          try {
+            const newAllocation = await this.allocationsService.create({
+              userId: equipment.currentUserId.toString(),
+              equipments: [{ equipmentId: equipment._id.toString() } as any],
+              deliveryDate: new Date().toISOString(),
+            }, 'Jira Sync');
+            this.logger.log(`✅ Allocation créée avec succès (ID: ${newAllocation._id}).`);
+
+            // Générer le PDF de dotation et mettre à jour les documents de l'utilisateur
+            if (this.pdfGeneratorService && newAllocation._id) {
+              try {
+                await this.pdfGeneratorService.generateAllocationPDF(newAllocation._id.toString());
+                this.logger.log(`✅ Allocation et document PDF créés avec succès.`);
+              } catch (pdfErr: any) {
+                this.logger.error(`❌ Erreur lors de la génération du PDF pour l'allocation ${newAllocation._id}: ${pdfErr.message}`);
+              }
+            } else {
+              this.logger.warn(`⚠️ PdfGeneratorService non disponible, le PDF ne sera pas généré.`);
+            }
+          } catch (err: any) {
+            this.logger.error(`❌ Erreur lors de la création automatique de l'allocation: ${err.message}`);
+          }
+        }
+      }
     }
 
     return equipment;
