@@ -31,14 +31,20 @@ async function bootstrap() {
   );
 
   // Configuration CORS améliorée
-  const allowedOrigins = (process.env.FRONTEND_URL || '').split(',').map(url => url.trim());
-  // Ajout manuel de localhost pour être sûr
-  if (!allowedOrigins.includes('http://localhost:3001')) {
-    allowedOrigins.push('http://localhost:3001');
+  const allowedOrigins = (process.env.FRONTEND_URL || '').split(',').map(url => url.trim()).filter(Boolean);
+  // Origines toujours autorisées
+  const defaultOrigins = [
+    'http://localhost:3001',
+    'https://dotation.groupe-espi.fr',
+  ];
+  for (const origin of defaultOrigins) {
+    if (!allowedOrigins.includes(origin)) {
+      allowedOrigins.push(origin);
+    }
   }
 
   app.enableCors({
-    origin: allowedOrigins.length > 0 ? allowedOrigins : 'http://localhost:3001',
+    origin: allowedOrigins,
     credentials: true,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     allowedHeaders: 'Content-Type, Accept, Authorization',
