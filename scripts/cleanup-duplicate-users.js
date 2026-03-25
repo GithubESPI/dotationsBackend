@@ -24,8 +24,8 @@ const objectTypeId = "26"; // ID pour 'Users'
 
 // Paramètres de nettoyage
 const DRY_RUN = process.argv.includes('--dry-run');
-const BATCH_SIZE = 20; // Nombre de suppressions par lot
-const BATCH_DELAY = 1000; // Délai entre les lots en ms
+const BATCH_SIZE = 5; // Encore plus réduit pour finir proprement
+const BATCH_DELAY = 1500; // Augmenté pour éviter 429
 
 async function cleanup() {
   try {
@@ -76,7 +76,10 @@ async function cleanup() {
     
     for (const user of allUsers) {
       // Le nom est dans user.name ou user.label
-      const name = (user.name || user.label || 'Inconnu').trim().toLowerCase();
+      const name = (user.name || user.label || 'Inconnu')
+        .replace(/\s+/g, ' ') // Normaliser les espaces multiples en un seul
+        .trim()
+        .toLowerCase();
       
       // Chercher aussi un email dans les attributs pour plus de précision
       let emailVal = "";
@@ -88,7 +91,7 @@ async function cleanup() {
         }
       }
       
-      const key = emailVal || name;
+      const key = emailVal || name.replace(/\s+/g, ''); // Utiliser le nom sans espaces comme clé finale
       if (!groups[key]) groups[key] = [];
       groups[key].push({
         id: user.id,

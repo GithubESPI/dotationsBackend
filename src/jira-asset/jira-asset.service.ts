@@ -117,7 +117,8 @@ export class JiraAssetService {
    */
   async findAssetUserByEmail(email: string, displayName?: string): Promise<JiraAssetObjectResponse | null> {
     try {
-      this.logger.debug(`🔍 Recherche de l'utilisateur Asset: Email=${email}, Name=${displayName}`);
+      const normalizedDisplayName = displayName?.replace(/\s+/g, ' ').trim();
+      this.logger.debug(`🔍 Recherche de l'utilisateur Asset: Email=${email}, Name=${normalizedDisplayName}`);
       const schemaName = 'Parc Informatique';
       const objectTypeName = 'Users';
 
@@ -141,11 +142,11 @@ export class JiraAssetService {
         queryParts.push(`"Name" LIKE "${email}"`);
       }
 
-      if (displayName) {
-        queryParts.push(`"Name" LIKE "${displayName}"`);
+      if (normalizedDisplayName) {
+        queryParts.push(`"Name" LIKE "${normalizedDisplayName}"`);
         
         // Si on a le nom et le prénom séparés (souvent "Prénom Nom")
-        const parts = displayName.split(' ');
+        const parts = normalizedDisplayName.split(' ');
         if (parts.length >= 2) {
            const firstName = parts[0];
            const lastName = parts.slice(1).join(' ');
@@ -158,11 +159,10 @@ export class JiraAssetService {
       const query = `objectType = "${objectTypeName}" AND (${queryParts.join(' OR ')})`;
       this.logger.debug(`🔍 AQL Query: ${query}`);
 
-      const results = await this.searchAssetsInJira(objectTypeName, query, 10); // Augmenter la limite pour détecter les doublons
+      const results = await this.searchAssetsInJira(objectTypeName, query, 10); 
 
       if (results.length > 0) {
-        // En cas de doublons, on prend le plus ancien (ID le plus petit ou date de création la plus ancienne)
-        // Les résultats Jira sont souvent triés par ID ou date mais on s'assure de prendre un candidat solide.
+        // En cas de doublons, on prend le plus ancien (ID le plus petit)
         const bestMatch = results.sort((a, b) => parseInt(a.id) - parseInt(b.id))[0];
         this.logger.debug(`✅ Utilisateur Asset trouvé: ${bestMatch.objectKey} (ID: ${bestMatch.id})`);
         if (results.length > 1) {
@@ -173,7 +173,6 @@ export class JiraAssetService {
 
       return null;
     } catch (error) {
-      this.logger.warn(`⚠️ Erreur recherche utilisateur Asset: ${error.message}`);
       return null;
     }
   }
@@ -183,9 +182,9 @@ export class JiraAssetService {
    */
   async createAssetUser(user: { email: string; firstName: string; lastName: string; displayName: string }): Promise<JiraAssetObjectResponse | null> {
     try {
+      const normalizedDisplayName = user.displayName?.replace(/\s+/g, ' ').trim();
       // SÉCURITÉ : Vérifier à nouveau si l'utilisateur existe déjà par son nom complet
-      // pour éviter les doublons si findAssetUserByEmail a été appelé sans displayName
-      const existing = await this.findAssetUserByEmail(user.email, user.displayName);
+      const existing = await this.findAssetUserByEmail(user.email, normalizedDisplayName);
       if (existing) {
         this.logger.log(`ℹ️ L'utilisateur Asset ${user.email} existe déjà (ID: ${existing.id}), création annulée.`);
         return existing;
@@ -194,7 +193,7 @@ export class JiraAssetService {
       this.logger.log(`👤 Création de l'utilisateur Asset: ${user.email}`);
       const schemaName = 'Parc Informatique';
       const objectTypeName = 'Users';
-// ... rest of the method as before, but ensure we set 'Nom' and 'Prenoms' correctly
+
       // ID du type d'objet
       const schemaId = await this.getObjectSchemaId(schemaName);
       const objectTypes = await this.getAllObjectTypes(schemaId!);
@@ -211,7 +210,7 @@ export class JiraAssetService {
       const emailAttr = findAttr(['email', 'e-mail', 'mail']);
 
       if (nomAttr && nomAttr.type !== 2) {
-        attributesToCreate.push({ objectTypeAttributeId: nomAttr.id, objectAttributeValues: [{ value: user.lastName || user.displayName }] });
+        attributesToCreate.push({ objectTypeAttributeId: nomAttr.id, objectAttributeValues: [{ value: user.lastName || normalizedDisplayName }] });
       }
       if (prenomsAttr && prenomsAttr.type !== 2) {
         attributesToCreate.push({ objectTypeAttributeId: prenomsAttr.id, objectAttributeValues: [{ value: user.firstName }] });
@@ -220,10 +219,9 @@ export class JiraAssetService {
         attributesToCreate.push({ objectTypeAttributeId: emailAttr.id, objectAttributeValues: [{ value: user.email }] });
       }
 
-      // Si on n'a ni 'Nom' explicite ni 'Prenoms', ou si on doit remplir l'attribut spécial Name
       const nameAttr = attributesDefinition.find(a => a.name === 'Name' || a.name === 'Nom Complet');
       if (nameAttr && !attributesToCreate.find(a => a.objectTypeAttributeId === nameAttr.id)) {
-        attributesToCreate.push({ objectTypeAttributeId: nameAttr.id, objectAttributeValues: [{ value: user.displayName }] });
+        attributesToCreate.push({ objectTypeAttributeId: nameAttr.id, objectAttributeValues: [{ value: normalizedDisplayName }] });
       }
 
       return await this.createAssetInJira(objectType.id, attributesToCreate);
@@ -1475,7 +1473,7 @@ export class JiraAssetService {
         // Chercher une allocation active pour CET équipement
         const activeAlloc = await AllocationModel.findOne({
           'equipments.equipmentId': equipment._id,
-          status: { $in: ['draft', 'signed', 'delivered'] },
+          status: { $in: ['en_cours', 'en_retard'] },
         }).exec();
 
         if (activeAlloc && activeAlloc.userId.toString() === equipment.currentUserId.toString()) {

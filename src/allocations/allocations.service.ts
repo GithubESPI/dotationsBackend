@@ -183,6 +183,25 @@ export class AllocationsService {
       );
     }
 
+    // NOUVEAU : Vérifier si une allocation active existe déjà pour l'un de ces équipements
+    // Cela évite les doublons dans la "documentation" sur le profil de l'employé
+    for (const eqId of equipmentIds) {
+      const activeAlloc = await this.allocationModel.findOne({
+        'equipments.equipmentId': new Types.ObjectId(eqId),
+        status: { $in: [AllocationStatus.EN_COURS, AllocationStatus.EN_RETARD] },
+      }).exec();
+
+      if (activeAlloc) {
+        if (activeAlloc.userId.toString() === createDto.userId.toString()) {
+          this.logger.log(`ℹ️ Une allocation active existe déjà pour l'équipement ${eqId} et cet utilisateur. Retour de l'existante.`);
+          return activeAlloc.populate('userId', 'displayName email department');
+        } else {
+          this.logger.warn(`⚠️ L'équipement ${eqId} est déjà présent dans une autre allocation active (${activeAlloc._id})`);
+          // Note: Normalement indisponible déjà géré au-dessus, mais cette double vérification est plus sûre pour la logique métier
+        }
+      }
+    }
+
     // Préparer les données de l'allocation
     // Utiliser les résolutions pour mapper correctement les équipements
     const equipmentItems = equipmentResolutions.map(resolution => {

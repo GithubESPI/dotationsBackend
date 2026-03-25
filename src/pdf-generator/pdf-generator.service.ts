@@ -38,6 +38,15 @@ export class PdfGeneratorService {
       throw new NotFoundException(`Allocation avec l'ID ${allocationId} non trouvée`);
     }
 
+    // Vérifier si un document existe déjà pour cette allocation
+    if (allocation.documentId) {
+      const existingDoc = await this.documentModel.findById(allocation.documentId).exec();
+      if (existingDoc) {
+        this.logger.log(`ℹ️ Document déjà existant pour l'allocation ${allocationId}. Réutilisation.`);
+        return existingDoc;
+      }
+    }
+
     const user = allocation.userId as any as UserDocument;
     if (!user) {
       throw new NotFoundException('Utilisateur associé à l\'allocation non trouvé');
@@ -124,6 +133,15 @@ export class PdfGeneratorService {
 
     if (!returnDoc) {
       throw new NotFoundException(`Restitution avec l'ID ${returnId} non trouvée`);
+    }
+
+    // Vérifier si un document existe déjà pour cette restitution
+    if (returnDoc.returnDocumentId) {
+      const existingDoc = await this.documentModel.findById(returnDoc.returnDocumentId).exec();
+      if (existingDoc) {
+        this.logger.log(`ℹ️ Document déjà existant pour la restitution ${returnId}. Réutilisation.`);
+        return existingDoc;
+      }
     }
 
     const user = returnDoc.userId as any as UserDocument;
