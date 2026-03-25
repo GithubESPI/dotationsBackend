@@ -143,7 +143,12 @@ export class JiraAssetService {
       }
 
       if (normalizedDisplayName) {
+        // Recherche exacte sur le Name
         queryParts.push(`"Name" LIKE "${normalizedDisplayName}"`);
+        
+        // Recherche plus souple avec wildcards pour les espaces (ex: "Prenom  Nom" vs "Prenom Nom")
+        const wildcardName = normalizedDisplayName.replace(/\s+/g, '%');
+        queryParts.push(`"Name" LIKE "%${wildcardName}%"`);
         
         // Si on a le nom et le prénom séparés (souvent "Prénom Nom")
         const parts = normalizedDisplayName.split(' ');
@@ -151,7 +156,9 @@ export class JiraAssetService {
            const firstName = parts[0];
            const lastName = parts.slice(1).join(' ');
            if (nomAttr && prenomsAttr) {
-             queryParts.push(`("${nomAttr.name}" LIKE "${lastName}" AND "${prenomsAttr.name}" LIKE "${firstName}")`);
+             // Recherche croisée sur les attributs Nom et Prénoms
+             queryParts.push(`("${nomAttr.name}" LIKE "%${lastName}%" AND "${prenomsAttr.name}" LIKE "%${firstName}%")`);
+             queryParts.push(`("${nomAttr.name}" LIKE "%${firstName}%" AND "${prenomsAttr.name}" LIKE "%${lastName}%")`);
            }
         }
       }
