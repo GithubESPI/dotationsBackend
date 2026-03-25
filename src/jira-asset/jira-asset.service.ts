@@ -118,53 +118,57 @@ export class JiraAssetService {
   async findAssetUserByEmail(email: string, displayName?: string): Promise<JiraAssetObjectResponse | null> {
     try {
       this.logger.debug(`🔍 Recherche de l'utilisateur Asset: Email=${email}, Name=${displayName}`);
-      const schemaName = 'Parc Informatique'; // Nom correct selon les logs
+      const schemaName = 'Parc Informatique';
       const objectTypeName = 'Users';
 
       // 1. Récupérer les attributs pour identifier les champs
       const attributesDefinition = await this.getObjectTypeAttributesDetails(objectTypeName, schemaName);
 
       const emailAttr = attributesDefinition.find(a => ['email', 'e-mail', 'mail'].includes(a.name.toLowerCase()));
-      const nameDefs = attributesDefinition.find(a => ['name', 'nom complet'].includes(a.name.toLowerCase()));
-      const nomAttr = attributesDefinition.find(a => ['nom', 'lastname', 'surname'].includes(a.name.toLowerCase()));
+      const nomAttr = attributesDefinition.find(a => ['nom', 'lastname', 'surname', 'name'].includes(a.name.toLowerCase()));
+      const prenomsAttr = attributesDefinition.find(a => ['prenom', 'prenoms', 'prénoms', 'firstname', 'givenname'].includes(a.name.toLowerCase()));
 
       let queryParts: string[] = [];
 
-      // Stratégie de recherche: Email OU Name
-      if (emailAttr) {
+      // Stratégie de recherche: Email OU Name OU (Nom ET Prenom)
+      if (emailAttr && email) {
         queryParts.push(`"${emailAttr.name}" = "${email}"`);
       }
-      // Recherche par le nom (Name default ou attribut Nom)
-      // On essaye de construire une recherche sur le texte
+      
       if (email) {
-        // Fallback recherche textuelle large si pas d'attribut email spécifique
-        if (!emailAttr) queryParts.push(`anyAttribute LIKE "${email}"`);
+        // Fallback recherche textuelle large
+        queryParts.push(`anyAttribute LIKE "${email}"`);
+        queryParts.push(`"Name" LIKE "${email}"`);
       }
 
-      queryParts.push(`"Name" LIKE "${email}"`); // Souvent le Name contient le nom affiché ou email
-      // Recherche aussi par le Nom s'il est fourni (pour éviter les doublons si l'email n'est pas rempli)
-      // On suppose que l'email peut servir d'identifiant textuel si le nom est manquant lors de l'appel
-      // Mais ici on utilise l'argument 'email' qui est souvent l'identifiant principal
-      if (nomAttr) {
-        queryParts.push(`"${nomAttr.name}" LIKE "${email}"`);
-        if (displayName) queryParts.push(`"${nomAttr.name}" LIKE "${displayName}"`);
-      }
       if (displayName) {
         queryParts.push(`"Name" LIKE "${displayName}"`);
+        
+        // Si on a le nom et le prénom séparés (souvent "Prénom Nom")
+        const parts = displayName.split(' ');
+        if (parts.length >= 2) {
+           const firstName = parts[0];
+           const lastName = parts.slice(1).join(' ');
+           if (nomAttr && prenomsAttr) {
+             queryParts.push(`("${nomAttr.name}" LIKE "${lastName}" AND "${prenomsAttr.name}" LIKE "${firstName}")`);
+           }
+        }
       }
 
-      // Si l'email ressemble à un nom (ex: "prenom.nom"), on peut essayer de chercher "Prenom Nom" ? 
-      // Pour l'instant on reste sur la valeur exacte ou contenue de l'email.
-
       const query = `objectType = "${objectTypeName}" AND (${queryParts.join(' OR ')})`;
-
       this.logger.debug(`🔍 AQL Query: ${query}`);
 
-      const results = await this.searchAssetsInJira(objectTypeName, query, 1);
+      const results = await this.searchAssetsInJira(objectTypeName, query, 10); // Augmenter la limite pour détecter les doublons
 
       if (results.length > 0) {
-        this.logger.debug(`✅ Utilisateur Asset trouvé: ${results[0].objectKey}`);
-        return results[0];
+        // En cas de doublons, on prend le plus ancien (ID le plus petit ou date de création la plus ancienne)
+        // Les résultats Jira sont souvent triés par ID ou date mais on s'assure de prendre un candidat solide.
+        const bestMatch = results.sort((a, b) => parseInt(a.id) - parseInt(b.id))[0];
+        this.logger.debug(`✅ Utilisateur Asset trouvé: ${bestMatch.objectKey} (ID: ${bestMatch.id})`);
+        if (results.length > 1) {
+          this.logger.warn(`⚠️ ${results.length} doublons trouvés pour ${email || displayName}. Utilisation du plus ancien.`);
+        }
+        return bestMatch;
       }
 
       return null;
@@ -179,37 +183,35 @@ export class JiraAssetService {
    */
   async createAssetUser(user: { email: string; firstName: string; lastName: string; displayName: string }): Promise<JiraAssetObjectResponse | null> {
     try {
+      // SÉCURITÉ : Vérifier à nouveau si l'utilisateur existe déjà par son nom complet
+      // pour éviter les doublons si findAssetUserByEmail a été appelé sans displayName
+      const existing = await this.findAssetUserByEmail(user.email, user.displayName);
+      if (existing) {
+        this.logger.log(`ℹ️ L'utilisateur Asset ${user.email} existe déjà (ID: ${existing.id}), création annulée.`);
+        return existing;
+      }
+
       this.logger.log(`👤 Création de l'utilisateur Asset: ${user.email}`);
       const schemaName = 'Parc Informatique';
       const objectTypeName = 'Users';
-
-      // 1. Récupérer l'ID du type d'objet
+// ... rest of the method as before, but ensure we set 'Nom' and 'Prenoms' correctly
+      // ID du type d'objet
       const schemaId = await this.getObjectSchemaId(schemaName);
       const objectTypes = await this.getAllObjectTypes(schemaId!);
       const objectType = objectTypes.find(ot => ot.name === objectTypeName);
 
       if (!objectType) throw new Error(`Type d'objet "${objectTypeName}" non trouvé`);
 
-      // 2. Récupérer les définitions d'attributs pour mapper les valeurs
       const attributesDefinition = await this.getObjectTypeAttributesDetails(objectTypeName, schemaName);
-
       const attributesToCreate: any[] = [];
-
-      // Helper pour trouver l'attribut définitions
       const findAttr = (names: string[]) => attributesDefinition.find(a => names.includes(a.name.toLowerCase()));
 
-      const nomAttr = findAttr(['nom', 'lastname', 'surname']);
-      const prenomsAttr = findAttr(['prenoms', 'prénoms', 'firstname', 'givenname']);
+      const nomAttr = findAttr(['nom', 'lastname', 'surname', 'name']);
+      const prenomsAttr = findAttr(['prenoms', 'prénoms', 'firstname', 'givenname', 'prenom']);
       const emailAttr = findAttr(['email', 'e-mail', 'mail']);
-      const nameAttr = findAttr(['name', 'nom complet']);
-
-      // IMPORTANT: On ne remplit QUE les champs texte (Type=0). 
-      // Si un champ est de Type=2 (User), on ne peut PAS mettre une string, il faut un accountId Jira.
-      // Comme l'utilisateur n'existe pas dans Jira (c'est le but), on saute les champs User.
 
       if (nomAttr && nomAttr.type !== 2) {
-        // Utiliser le displayName pour le champ "Nom" comme demandé (ex: "Abdel Bachouta")
-        attributesToCreate.push({ objectTypeAttributeId: nomAttr.id, objectAttributeValues: [{ value: user.displayName }] });
+        attributesToCreate.push({ objectTypeAttributeId: nomAttr.id, objectAttributeValues: [{ value: user.lastName || user.displayName }] });
       }
       if (prenomsAttr && prenomsAttr.type !== 2) {
         attributesToCreate.push({ objectTypeAttributeId: prenomsAttr.id, objectAttributeValues: [{ value: user.firstName }] });
@@ -218,18 +220,10 @@ export class JiraAssetService {
         attributesToCreate.push({ objectTypeAttributeId: emailAttr.id, objectAttributeValues: [{ value: user.email }] });
       }
 
-      // Le champ "Name" (interne Assets) est toujours requis.
-      if (nameAttr && nameAttr.id !== nomAttr?.id && nameAttr.id !== prenomsAttr?.id) {
+      // Si on n'a ni 'Nom' explicite ni 'Prenoms', ou si on doit remplir l'attribut spécial Name
+      const nameAttr = attributesDefinition.find(a => a.name === 'Name' || a.name === 'Nom Complet');
+      if (nameAttr && !attributesToCreate.find(a => a.objectTypeAttributeId === nameAttr.id)) {
         attributesToCreate.push({ objectTypeAttributeId: nameAttr.id, objectAttributeValues: [{ value: user.displayName }] });
-      } else {
-        // Si on n'a pas trouvé d'attribut "Name" explicite, Assets utilise souvent le premier attribut texte ou un attribut spécial "Name"
-        // Si 'nomAttr' est le Name, il est déjà mis.
-        // On peut essayer de forcer l'attribut Name par défaut si on le connaissait, mais map le displayName sur 'Name' est une bonne pratique.
-        // Cherchons l'attribut qui s'appelle "Name" (souvent ID bas ou type 0)
-        const defaultNameAttr = attributesDefinition.find(a => a.name === 'Name');
-        if (defaultNameAttr && !attributesToCreate.find(a => a.objectTypeAttributeId === defaultNameAttr.id)) {
-          attributesToCreate.push({ objectTypeAttributeId: defaultNameAttr.id, objectAttributeValues: [{ value: user.displayName }] });
-        }
       }
 
       return await this.createAssetInJira(objectType.id, attributesToCreate);
