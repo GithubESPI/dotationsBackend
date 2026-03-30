@@ -65,6 +65,11 @@ export class JiraAssetService {
   // Empêche 2 appels parallèles de créer le même utilisateur Asset simultanément
   private readonly userCreationLocks = new Map<string, Promise<JiraAssetObjectResponse | null>>();
 
+  // Cache court terme des utilisateurs Asset trouvés (TTL 60 secondes)
+  // Évite de multiples recherches API pour le même utilisateur lors d'une synchro massive
+  private readonly userCache = new Map<string, { user: JiraAssetObjectResponse; expiresAt: number }>();
+  private readonly USER_CACHE_TTL_MS = 60_000; // 60 secondes
+
   constructor(
     private readonly configService: ConfigService,
     private readonly httpService: HttpService,
@@ -116,61 +121,50 @@ export class JiraAssetService {
   }
 
   /**
-   * Rechercher un objet Utilisateur dans Jira Assets par email
-   * Chercher un utilisateur Asset par Email ou Nom
+   * Rechercher un objet Utilisateur dans Jira Assets par Nom Complet
+   * (Les objets Users dans Jira n'ont pas de champ Email - on compare sur le nom complet Office 365)
    */
   async findAssetUserByEmail(email: string, displayName?: string): Promise<JiraAssetObjectResponse | null> {
+    // La clé de comparaison est TOUJOURS le displayName normalisé (sans espaces multiples, sans casse)
+    // On utilise l'email uniquement comme fallback de la clé de cache interne
+    const normalizedDisplayName = displayName?.replace(/\s+/g, ' ').trim();
+    const normalizedEmail = email?.trim().toLowerCase();
+    
+    // Il faut au minimum un displayName pour chercher dans Jira (pas d'email dans le schéma Asset)
+    if (!normalizedDisplayName && !normalizedEmail) return null;
+
+    // Clé de cache = nom sans espaces en minuscules (plus stable que l'email)
+    const cacheKey = normalizedDisplayName
+      ? normalizedDisplayName.replace(/\s+/g, '').toLowerCase()
+      : normalizedEmail!;
+
+    // Vérifier le cache d'abord
+    const cached = this.userCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      this.logger.debug(`📦 Utilisateur trouvé en cache: "${normalizedDisplayName}" (ID: ${cached.user.id})`);
+      return cached.user;
+    }
+
+    this.logger.debug(`🔍 Recherche de l'utilisateur Asset par nom: "${normalizedDisplayName}"`);
+    
+    const objectTypeName = 'Users';
+
     try {
-      const normalizedEmail = email?.trim().toLowerCase();
-      // On collapse les espaces ET on trim pour la comparaison
-      const normalizedDisplayName = displayName?.replace(/\s+/g, ' ').trim();
-      
-      if (!normalizedEmail && !normalizedDisplayName) return null;
-
-      this.logger.debug(`🔍 Recherche de l'utilisateur Asset: Email=${normalizedEmail}, Name=${normalizedDisplayName}`);
-      
-      const schemaName = 'Parc Informatique';
-      const objectTypeName = 'Users';
-
-      // 1. Récupérer les attributs pour identifier les champs
-      const attributesDefinition = await this.getObjectTypeAttributesDetails(objectTypeName, schemaName);
-
-      const emailAttr = attributesDefinition.find(a => ['email', 'e-mail', 'mail'].includes(a.name.toLowerCase()));
-      const nomAttr = attributesDefinition.find(a => ['nom', 'lastname', 'surname', 'name'].includes(a.name.toLowerCase()));
-      const prenomsAttr = attributesDefinition.find(a => ['prenom', 'prenoms', 'prénoms', 'firstname', 'givenname'].includes(a.name.toLowerCase()));
-
-      let queryParts: string[] = [];
-
-      // Stratégie de recherche: Email OU Name OU (Nom ET Prenom)
-      if (emailAttr && normalizedEmail) {
-        queryParts.push(`"${emailAttr.name}" = "${normalizedEmail}"`);
-      }
-      
-      if (normalizedEmail) {
-        // Fallback recherche textuelle large
-        queryParts.push(`anyAttribute LIKE "${normalizedEmail}"`);
-        queryParts.push(`"Name" LIKE "${normalizedEmail}"`);
-      }
+      // Les objets Users dans Jira n'ont pas d'email -> on cherche uniquement par Nom
+      // On construit plusieurs variantes pour être robuste aux différences de casse et d'espaces
+      const queryParts: string[] = [];
 
       if (normalizedDisplayName) {
-        // Recherche exacte sur le Name
-        queryParts.push(`"Name" LIKE "${normalizedDisplayName}"`);
-        
-        // Recherche plus souple avec wildcards pour les espaces (ex: "Prenom  Nom" vs "Prenom Nom")
+        // 1. Correspondance exacte (la plus précise)
+        queryParts.push(`"Name" = "${normalizedDisplayName}"`);
+
+        // 2. Wildcard pour absorber les espaces multiples ex: "Alice  CARTIER" vs "Alice CARTIER"
         const wildcardName = normalizedDisplayName.replace(/\s+/g, '%');
         queryParts.push(`"Name" LIKE "%${wildcardName}%"`);
-        
-        // Si on a le nom et le prénom séparés (souvent "Prénom Nom")
-        const parts = normalizedDisplayName.split(' ');
-        if (parts.length >= 2) {
-           const firstName = parts[0];
-           const lastName = parts.slice(1).join(' ');
-           if (nomAttr && prenomsAttr) {
-             // Recherche croisée sur les attributs Nom et Prénoms
-             queryParts.push(`("${nomAttr.name}" LIKE "%${lastName}%" AND "${prenomsAttr.name}" LIKE "%${firstName}%")`);
-             queryParts.push(`("${nomAttr.name}" LIKE "%${firstName}%" AND "${prenomsAttr.name}" LIKE "%${lastName}%")`);
-           }
-        }
+
+        // 3. Recherche insensible à la casse (via LIKE en minuscules)
+        queryParts.push(`"Name" LIKE "${normalizedDisplayName.toLowerCase()}"`);
+        queryParts.push(`"Name" LIKE "${normalizedDisplayName.toUpperCase()}"`);
       }
 
       if (queryParts.length === 0) return null;
@@ -178,43 +172,52 @@ export class JiraAssetService {
       const query = `objectType = "${objectTypeName}" AND (${queryParts.join(' OR ')})`;
       this.logger.debug(`🔍 AQL Query: ${query}`);
 
-      const results = await this.searchAssetsInJira(objectTypeName, query, 10); 
+      const results = await this.searchAssetsInJira(objectTypeName, query, 20);
 
       if (results.length > 0) {
         // En cas de doublons, on prend le plus ancien (ID le plus petit) pour la stabilité
         const bestMatch = results.sort((a, b) => parseInt(a.id) - parseInt(b.id))[0];
         this.logger.debug(`✅ Utilisateur Asset trouvé: ${bestMatch.objectKey} (ID: ${bestMatch.id})`);
         if (results.length > 1) {
-          this.logger.warn(`⚠️ ${results.length} doublons trouvés pour ${email || displayName}. Utilisation du plus ancien.`);
+          this.logger.warn(`⚠️ ${results.length} doublons trouvés pour "${normalizedDisplayName}". Utilisation du plus ancien.`);
         }
+        // Mettre en cache pour toute la durée de la synchro
+        this.userCache.set(cacheKey, { user: bestMatch, expiresAt: Date.now() + this.USER_CACHE_TTL_MS });
         return bestMatch;
       }
 
       return null;
-    } catch (error) {
-      this.logger.error(`❌ Erreur lors de la recherche de l'utilisateur Asset ${email || displayName}: ${error.message}`);
-      // On propage l'erreur au lieu de retourner null pour éviter les créations intempestives en cas de problème API (ex: 429)
+    } catch (error: any) {
+      this.logger.error(`❌ Erreur lors de la recherche de l'utilisateur Asset "${normalizedDisplayName}": ${error.message}`);
+      // On propage l'erreur pour bloquer toute création en cas de problème API
       throw error;
     }
   }
 
   /**
-   * Créer un objet Utilisateur dans Jira Assets
+   * Créer un objet Utilisateur dans Jira Assets (avec verrou et cache)
    */
   async createAssetUser(user: { email: string; firstName: string; lastName: string; displayName: string }): Promise<JiraAssetObjectResponse | null> {
-    // Clé unique pour ce verrou : email normalisé, ou nom sans espaces si pas d'email
-    const normalizedEmail = user.email?.trim().toLowerCase();
+    // Clé unique basée sur le NOM COMPLET normalisé (sans espaces, minuscules)
+    // C'est la seule donnée fiable : Jira n'a pas de champ email
     const normalizedDisplayName = user.displayName?.replace(/\s+/g, ' ').trim();
-    const lockKey = normalizedEmail || normalizedDisplayName?.replace(/\s+/g, '').toLowerCase() || 'unknown';
+    const lockKey = normalizedDisplayName?.replace(/\s+/g, '').toLowerCase() || user.email?.trim().toLowerCase() || 'unknown';
 
-    // Si une création est déjà en cours pour cet utilisateur (race condition entre Promise.all),
-    // on attend le résultat de cette création au lieu d'en lancer une nouvelle.
+    // 1. Vérifier le cache d'abord (résultat immédiat, pas d'appel API)
+    const cached = this.userCache.get(lockKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      this.logger.debug(`📦 Utilisateur trouvé en cache (createAssetUser): ${lockKey}`);
+      return cached.user;
+    }
+
+    // 2. Si une création est déjà en cours pour cet utilisateur (race condition entre Promise.all),
+    //    on attend le résultat de cette création au lieu d'en lancer une nouvelle.
     if (this.userCreationLocks.has(lockKey)) {
       this.logger.warn(`🔒 Création déjà en cours pour "${lockKey}", attente du résultat existant...`);
       return this.userCreationLocks.get(lockKey)!;
     }
 
-    const creationPromise = this._doCreateAssetUser(user, normalizedDisplayName, normalizedEmail, lockKey);
+    const creationPromise = this._doCreateAssetUser(user, normalizedDisplayName, user.email?.trim().toLowerCase(), lockKey);
     this.userCreationLocks.set(lockKey, creationPromise);
 
     try {
@@ -234,15 +237,26 @@ export class JiraAssetService {
     normalizedEmail: string,
     lockKey: string
   ): Promise<JiraAssetObjectResponse | null> {
+    // SÉCURITÉ 1 : Vérifier si l'utilisateur existe déjà dans Jira
+    // findAssetUserByEmail propage les erreurs réseau → si erreur API, on arrête ici
+    let existing: JiraAssetObjectResponse | null = null;
     try {
-      // SÉCURITÉ : Vérifier à nouveau si l'utilisateur existe déjà
-      // Note: findAssetUserByEmail propage désormais les erreurs, donc on ne créera pas si l'API Jira est en erreur
-      const existing = await this.findAssetUserByEmail(user.email, normalizedDisplayName);
-      if (existing) {
-        this.logger.log(`ℹ️ L'utilisateur Asset "${lockKey}" existe déjà (ID: ${existing.id}), création annulée.`);
-        return existing;
-      }
+      existing = await this.findAssetUserByEmail(user.email, normalizedDisplayName);
+    } catch (searchError: any) {
+      this.logger.error(`❌ Erreur lors de la recherche préalable pour "${lockKey}": ${searchError.message}. Création bloquée.`);
+      // On ne peut pas vérifier l'existence → on ne crée pas pour éviter un doublon
+      return null;
+    }
 
+    if (existing) {
+      this.logger.log(`ℹ️ L'utilisateur Asset "${lockKey}" existe déjà (ID: ${existing.id}), création annulée.`);
+      // Mettre en cache pour les prochains appels dans cette session
+      this.userCache.set(lockKey, { user: existing, expiresAt: Date.now() + this.USER_CACHE_TTL_MS });
+      return existing;
+    }
+
+    // SÉCURITÉ 2 : Créer l'utilisateur
+    try {
       this.logger.log(`👤 Création de l'utilisateur Asset: ${user.email} (${normalizedDisplayName})`);
       const schemaName = 'Parc Informatique';
       const objectTypeName = 'Users';
@@ -279,8 +293,10 @@ export class JiraAssetService {
 
       const result = await this.createAssetInJira(objectType.id, attributesToCreate);
       this.logger.log(`✅ Utilisateur Asset créé avec succès: ${result.objectKey} (ID: ${result.id})`);
+      // Mettre en cache le nouvel utilisateur créé
+      this.userCache.set(lockKey, { user: result, expiresAt: Date.now() + this.USER_CACHE_TTL_MS });
       return result;
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error(`❌ Impossible de créer l'utilisateur Asset ${user.email}: ${error.message}`);
       return null;
     }
