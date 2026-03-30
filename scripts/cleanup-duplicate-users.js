@@ -24,13 +24,37 @@ const objectTypeId = "26"; // ID pour 'Users'
 
 // Paramètres de nettoyage
 const DRY_RUN = process.argv.includes('--dry-run');
-const BATCH_SIZE = 5; // Encore plus réduit pour finir proprement
-const BATCH_DELAY = 1500; // Augmenté pour éviter 429
+const BATCH_SIZE = 25; // Augmenté pour la vitesse
+const BATCH_DELAY = 1000; // 1 second entre les lots
+
+async function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function deleteWithRetry(id, key, maxRetries = 3) {
+  let retries = 0;
+  while (retries < maxRetries) {
+    try {
+      await axios.delete(`${fullUrl}/object/${id}`, { headers });
+      return true;
+    } catch (err) {
+      if (err.response && err.response.status === 429) {
+        const retryAfter = parseInt(err.response.headers['retry-after']) || 5;
+        console.log(`\n⚠️ Rate limited sur ${key}. Attente de ${retryAfter}s...`);
+        await sleep(retryAfter * 1000);
+        retries++;
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error(`Max retries reached for ${key}`);
+}
 
 async function cleanup() {
   try {
     console.log("=".repeat(60));
-    console.log(`🧹 NETTOYAGE DES DOUBLONS JIRA ASSETS (Users)`);
+    console.log(`🧹 NETTOYAGE MASSIF DES DOUBLONS JIRA ASSETS (Users)`);
     console.log(`MODE: ${DRY_RUN ? '🔍 SIMULATION (DRY RUN)' : '🚀 RÉEL (EXECUTION)'}`);
     console.log("=".repeat(60));
 
@@ -70,18 +94,16 @@ async function cleanup() {
       return;
     }
 
-    // 2. Grouper par Nom Complet (Identifiant de doublon)
-    console.log(`\n🔍 Recherche de doublons par nom...`);
+    // 2. Grouper par Nom (Normalisé) et Email
+    console.log(`\n🔍 Recherche de doublons...`);
     const groups = {};
     
     for (const user of allUsers) {
-      // Le nom est dans user.name ou user.label
       const name = (user.name || user.label || 'Inconnu')
-        .replace(/\s+/g, ' ') // Normaliser les espaces multiples en un seul
+        .replace(/\s+/g, ' ')
         .trim()
         .toLowerCase();
       
-      // Chercher aussi un email dans les attributs pour plus de précision
       let emailVal = "";
       for (const attr of user.attributes) {
         const val = attr.objectAttributeValues?.[0]?.value;
@@ -91,7 +113,10 @@ async function cleanup() {
         }
       }
       
-      const key = emailVal || name.replace(/\s+/g, ''); // Utiliser le nom sans espaces comme clé finale
+      // La clé de dédoublonnement doit être robuste
+      // On utilise l'email s'il existe, sinon le nom sans aucun espace
+      const key = emailVal || name.replace(/\s+/g, ''); 
+      
       if (!groups[key]) groups[key] = [];
       groups[key].push({
         id: user.id,
@@ -108,7 +133,7 @@ async function cleanup() {
 
     for (const [key, list] of Object.entries(groups)) {
       if (list.length > 1) {
-        // Trier par date de création (on garde le plus ancien)
+        // Trier par date de création (on garde le plus ANCIEN)
         const sorted = list.sort((a, b) => a.created.getTime() - b.created.getTime());
         const kept = sorted[0];
         const duplicates = sorted.slice(1);
@@ -130,33 +155,34 @@ async function cleanup() {
     // 4. Exécuter la suppression
     if (DRY_RUN) {
       console.log(`\n🔍 [DRY RUN] Liste des premiers doublons qui seraient supprimés :`);
-      toDelete.slice(0, 20).forEach((d, i) => {
+      toDelete.slice(0, 10).forEach((d, i) => {
         console.log(`   ${i+1}. Supprimer ${d.key} (${d.name}) - Garder ${d.keptKey}`);
       });
-      if (toDelete.length > 20) console.log(`   ... et ${toDelete.length - 20} autres.`);
+      if (toDelete.length > 10) console.log(`   ... et ${toDelete.length - 10} autres.`);
       console.log(`\n💡 Lancez le script sans --dry-run pour effectuer les suppressions.`);
     } else {
-      console.log(`\n🚀 Début de la suppression de ${totalDuplicates} doublons...`);
+      console.log(`\n🚀 Début de la suppression massive de ${totalDuplicates} doublons...`);
       let deleted = 0;
       let errors = 0;
 
       for (let i = 0; i < toDelete.length; i += BATCH_SIZE) {
         const batch = toDelete.slice(i, i + BATCH_SIZE);
-        console.log(`\n⏳ Lot ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(toDelete.length / BATCH_SIZE)}...`);
+        const progress = Math.round((i / toDelete.length) * 100);
+        console.log(`\n📦 Lot ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(toDelete.length / BATCH_SIZE)} (${progress}%)`);
 
         await Promise.all(batch.map(async (item) => {
           try {
-            await axios.delete(`${fullUrl}/object/${item.id}`, { headers });
+            await deleteWithRetry(item.id, item.key);
             deleted++;
-            process.stdout.write(`\r   ✅ Supprimé: ${deleted}/${totalDuplicates}`);
+            process.stdout.write(`\r   ✅ Supprimés: ${deleted}/${totalDuplicates}`);
           } catch (err) {
             errors++;
-            console.error(`\n❌ Erreur lors de la suppression de ${item.key}: ${err.message}`);
+            console.error(`\n❌ Erreur sur ${item.key}: ${err.message}`);
           }
         }));
 
         if (i + BATCH_SIZE < toDelete.length) {
-          await new Promise(resolve => setTimeout(resolve, BATCH_DELAY));
+          await sleep(BATCH_DELAY);
         }
       }
 

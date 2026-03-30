@@ -61,6 +61,10 @@ export class JiraAssetService {
   private readonly email: string;
   private readonly emailAssets: string;
 
+  // Verrou de déduplication en mémoire : clé = email normalisé OU nom normalisé
+  // Empêche 2 appels parallèles de créer le même utilisateur Asset simultanément
+  private readonly userCreationLocks = new Map<string, Promise<JiraAssetObjectResponse | null>>();
+
   constructor(
     private readonly configService: ConfigService,
     private readonly httpService: HttpService,
@@ -117,8 +121,14 @@ export class JiraAssetService {
    */
   async findAssetUserByEmail(email: string, displayName?: string): Promise<JiraAssetObjectResponse | null> {
     try {
+      const normalizedEmail = email?.trim().toLowerCase();
+      // On collapse les espaces ET on trim pour la comparaison
       const normalizedDisplayName = displayName?.replace(/\s+/g, ' ').trim();
-      this.logger.debug(`🔍 Recherche de l'utilisateur Asset: Email=${email}, Name=${normalizedDisplayName}`);
+      
+      if (!normalizedEmail && !normalizedDisplayName) return null;
+
+      this.logger.debug(`🔍 Recherche de l'utilisateur Asset: Email=${normalizedEmail}, Name=${normalizedDisplayName}`);
+      
       const schemaName = 'Parc Informatique';
       const objectTypeName = 'Users';
 
@@ -132,14 +142,14 @@ export class JiraAssetService {
       let queryParts: string[] = [];
 
       // Stratégie de recherche: Email OU Name OU (Nom ET Prenom)
-      if (emailAttr && email) {
-        queryParts.push(`"${emailAttr.name}" = "${email}"`);
+      if (emailAttr && normalizedEmail) {
+        queryParts.push(`"${emailAttr.name}" = "${normalizedEmail}"`);
       }
       
-      if (email) {
+      if (normalizedEmail) {
         // Fallback recherche textuelle large
-        queryParts.push(`anyAttribute LIKE "${email}"`);
-        queryParts.push(`"Name" LIKE "${email}"`);
+        queryParts.push(`anyAttribute LIKE "${normalizedEmail}"`);
+        queryParts.push(`"Name" LIKE "${normalizedEmail}"`);
       }
 
       if (normalizedDisplayName) {
@@ -163,13 +173,15 @@ export class JiraAssetService {
         }
       }
 
+      if (queryParts.length === 0) return null;
+
       const query = `objectType = "${objectTypeName}" AND (${queryParts.join(' OR ')})`;
       this.logger.debug(`🔍 AQL Query: ${query}`);
 
       const results = await this.searchAssetsInJira(objectTypeName, query, 10); 
 
       if (results.length > 0) {
-        // En cas de doublons, on prend le plus ancien (ID le plus petit)
+        // En cas de doublons, on prend le plus ancien (ID le plus petit) pour la stabilité
         const bestMatch = results.sort((a, b) => parseInt(a.id) - parseInt(b.id))[0];
         this.logger.debug(`✅ Utilisateur Asset trouvé: ${bestMatch.objectKey} (ID: ${bestMatch.id})`);
         if (results.length > 1) {
@@ -180,7 +192,9 @@ export class JiraAssetService {
 
       return null;
     } catch (error) {
-      return null;
+      this.logger.error(`❌ Erreur lors de la recherche de l'utilisateur Asset ${email || displayName}: ${error.message}`);
+      // On propage l'erreur au lieu de retourner null pour éviter les créations intempestives en cas de problème API (ex: 429)
+      throw error;
     }
   }
 
@@ -188,16 +202,48 @@ export class JiraAssetService {
    * Créer un objet Utilisateur dans Jira Assets
    */
   async createAssetUser(user: { email: string; firstName: string; lastName: string; displayName: string }): Promise<JiraAssetObjectResponse | null> {
+    // Clé unique pour ce verrou : email normalisé, ou nom sans espaces si pas d'email
+    const normalizedEmail = user.email?.trim().toLowerCase();
+    const normalizedDisplayName = user.displayName?.replace(/\s+/g, ' ').trim();
+    const lockKey = normalizedEmail || normalizedDisplayName?.replace(/\s+/g, '').toLowerCase() || 'unknown';
+
+    // Si une création est déjà en cours pour cet utilisateur (race condition entre Promise.all),
+    // on attend le résultat de cette création au lieu d'en lancer une nouvelle.
+    if (this.userCreationLocks.has(lockKey)) {
+      this.logger.warn(`🔒 Création déjà en cours pour "${lockKey}", attente du résultat existant...`);
+      return this.userCreationLocks.get(lockKey)!;
+    }
+
+    const creationPromise = this._doCreateAssetUser(user, normalizedDisplayName, normalizedEmail, lockKey);
+    this.userCreationLocks.set(lockKey, creationPromise);
+
     try {
-      const normalizedDisplayName = user.displayName?.replace(/\s+/g, ' ').trim();
-      // SÉCURITÉ : Vérifier à nouveau si l'utilisateur existe déjà par son nom complet
+      return await creationPromise;
+    } finally {
+      // Libérer le verrou dès que la promesse est résolue (succès ou erreur)
+      this.userCreationLocks.delete(lockKey);
+    }
+  }
+
+  /**
+   * Logique interne de création d'utilisateur Asset - ne jamais appeler directement
+   */
+  private async _doCreateAssetUser(
+    user: { email: string; firstName: string; lastName: string; displayName: string },
+    normalizedDisplayName: string,
+    normalizedEmail: string,
+    lockKey: string
+  ): Promise<JiraAssetObjectResponse | null> {
+    try {
+      // SÉCURITÉ : Vérifier à nouveau si l'utilisateur existe déjà
+      // Note: findAssetUserByEmail propage désormais les erreurs, donc on ne créera pas si l'API Jira est en erreur
       const existing = await this.findAssetUserByEmail(user.email, normalizedDisplayName);
       if (existing) {
-        this.logger.log(`ℹ️ L'utilisateur Asset ${user.email} existe déjà (ID: ${existing.id}), création annulée.`);
+        this.logger.log(`ℹ️ L'utilisateur Asset "${lockKey}" existe déjà (ID: ${existing.id}), création annulée.`);
         return existing;
       }
 
-      this.logger.log(`👤 Création de l'utilisateur Asset: ${user.email}`);
+      this.logger.log(`👤 Création de l'utilisateur Asset: ${user.email} (${normalizedDisplayName})`);
       const schemaName = 'Parc Informatique';
       const objectTypeName = 'Users';
 
@@ -231,8 +277,9 @@ export class JiraAssetService {
         attributesToCreate.push({ objectTypeAttributeId: nameAttr.id, objectAttributeValues: [{ value: normalizedDisplayName }] });
       }
 
-      return await this.createAssetInJira(objectType.id, attributesToCreate);
-
+      const result = await this.createAssetInJira(objectType.id, attributesToCreate);
+      this.logger.log(`✅ Utilisateur Asset créé avec succès: ${result.objectKey} (ID: ${result.id})`);
+      return result;
     } catch (error) {
       this.logger.error(`❌ Impossible de créer l'utilisateur Asset ${user.email}: ${error.message}`);
       return null;
@@ -885,8 +932,10 @@ export class JiraAssetService {
         this.logger.warn(`⚠️ Numéro de série non détecté. Tentative de synchronisation avec les attributs disponibles...`);
       }
 
-      // Synchroniser chaque Laptop par lots pour améliorer les performances
-      const batchSize = 50;
+      // Synchroniser chaque équipement par lots réduits pour limiter les race conditions
+      // sur la création des utilisateurs Asset (duplication). Le verrou en mémoire gère
+      // les conflits au sein d'un même lot, mais réduire la taille réduit la charge totale.
+      const batchSize = 10;
       for (let i = 0; i < jiraAssets.length; i += batchSize) {
         const batch = jiraAssets.slice(i, i + batchSize);
         const batchPromises = batch.map(async (jiraAsset) => {
@@ -1277,34 +1326,32 @@ export class JiraAssetService {
     query?: string,
     limit: number = 50,
   ): Promise<JiraAssetObjectResponse[]> {
-    const workspaceId = await this.getWorkspaceId();
-
     try {
-      // Endpoint mis à jour pour la recherche IQL (GET)
-      const searchUrl = this.buildAssetsUrl('iql/objects');
+      // Modern Assets API (AQL)
+      const searchUrl = this.buildAssetsUrl('object/aql');
+
       const response = await firstValueFrom(
-        this.httpService.get<{ objectEntries: JiraAssetObjectResponse[] }>(
+        this.httpService.post<{ values: JiraAssetObjectResponse[] }>(
           searchUrl,
+          { qlQuery: query || "" },
           {
             params: {
-              objectTypeId,
-              iql: query || '',
-              page: 1,
-              resultPerPage: limit,
+              maxResults: limit,
+              includeAttributes: true,
             },
             headers: this.getAuthHeaders(),
           },
         ),
       );
 
-      return response.data.objectEntries || (response.data as any).values || [];
+      return response.data.values || [];
     } catch (error: any) {
-      this.logger.error(`❌ Erreur lors de la recherche d'assets dans Jira: ${error.message}`);
+      this.logger.error(`❌ Erreur lors de la recherche d'assets dans Jira (AQL): ${error.message}`);
       if (error.response) {
         this.logger.error(`Détails: ${JSON.stringify(error.response.data)}`);
       }
-      // Si l'API de recherche n'est pas disponible, retourner un tableau vide
-      return [];
+      // On propage l'erreur pour éviter de créer des doublons si l'API de recherche est HS
+      throw error;
     }
   }
 
