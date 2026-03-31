@@ -153,11 +153,9 @@ export class JiraAssetService {
         const response = await firstValueFrom(
           this.httpService.post<{ values: JiraAssetObjectResponse[]; total?: number }>(
             searchUrl,
-            { qlQuery: `objectType = "Users"` },
-            {
-              params: { startAt, maxResults: pageSize, includeAttributes: true },
-              headers: this.getAuthHeaders(),
-            },
+            // CORRECTION CRITIQUE: ces params doivent etre dans le corps JSON, pas en query params
+            { qlQuery: `objectType = "Users"`, maxResults: pageSize, startAt, includeAttributes: true },
+            { headers: this.getAuthHeaders() },
           ),
         );
         const page = response.data.values || [];
@@ -166,30 +164,30 @@ export class JiraAssetService {
         startAt += pageSize;
       }
 
-      // Vider et reconstruire le registre
       this.userRegistry.clear();
       for (const u of allUsers) {
-        // L'API Jira Assets retourne un champ "label" = le nom affiché de l'objet (ex: "Alice CARTIER")
-        // C'est ce champ qui correspond au displayName Office 365
-        const rawLabel: string = (u as any).label || u.objectKey || '';
-
-        // On indexe par le nom normalisé (sans espaces, minuscules)
-        // pour une comparaison JS robuste quel que soit la casse utilisée lors de la création
-        if (rawLabel) {
-          const labelKey = rawLabel.replace(/\s+/g, '').toLowerCase();
-          if (!this.userRegistry.has(labelKey)) {
-            this.userRegistry.set(labelKey, u);
-          }
+        // Index 1: label retourné par l'API Jira (nom affiché, ex: "Alice CARTIER")
+        const rawLabel: string = (u as any).label || '';
+        if (rawLabel && rawLabel.trim().length > 1) {
+          const k = rawLabel.replace(/\s+/g, '').toLowerCase();
+          if (!this.userRegistry.has(k)) this.userRegistry.set(k, u);
         }
 
-        // Aussi indexer chaque valeur textuelle des attributs comme clé alternative
+        // Index 2: valeurs textuelles de chaque attribut (Nom, Prénoms) - source de vérité
+        // retourne uniquement si includeAttributes: true est dans le corps POST
         for (const attr of u.attributes || []) {
           const val = attr.objectAttributeValues?.[0]?.value;
-          if (val && typeof val === 'string' && val.length > 2 && !val.includes('@')) {
-            const attrKey = val.replace(/\s+/g, '').toLowerCase();
-            if (!this.userRegistry.has(attrKey)) {
-              this.userRegistry.set(attrKey, u);
-            }
+          if (val && typeof val === 'string' && val.trim().length > 1) {
+            // Indexer la valeur complète ("Alice CARTIER" -> "alicecartier")
+            const k = val.replace(/\s+/g, '').toLowerCase();
+            if (!this.userRegistry.has(k)) this.userRegistry.set(k, u);
+            // Indexer chaque partie séparément ("Alice" et "CARTIER" séparément)
+            val.split(' ').forEach(part => {
+              const pk = part.toLowerCase().trim();
+              if (pk.length > 2 && !this.userRegistry.has(pk)) {
+                this.userRegistry.set(pk, u);
+              }
+            });
           }
         }
       }
@@ -348,24 +346,52 @@ export class JiraAssetService {
     normalizedEmail: string,
     lockKey: string
   ): Promise<JiraAssetObjectResponse | null> {
-    // SÉCURITÉ 1 : Vérifier si l'utilisateur existe déjà dans Jira
-    // findAssetUserByEmail propage les erreurs réseau → si erreur API, on arrête ici
+    // SÉCURITÉ 1 : Vérification multi-niveaux de l'existence de l'utilisateur
+    // Niveau A : Registre en mémoire (rapide) - le charger si vide
+    if (this.userRegistry.size === 0) {
+      await this.loadUserRegistry();
+    }
+
+    // Niveau B : Recherche dans le registre par clé normalisée
     let existing: JiraAssetObjectResponse | null = null;
+    const regResult = this.userRegistry.get(lockKey);
+    if (regResult) {
+      this.logger.log(`ℹ️ Utilisateur Asset trouvé dans le registre: "${lockKey}" (ID: ${regResult.id}), création annulée.`);
+      this.userCache.set(lockKey, { user: regResult, expiresAt: Date.now() + this.USER_CACHE_TTL_MS });
+      return regResult;
+    }
+
+    // Niveau C : Recherche AQL directe robuste (insensible à la casse via LIKE sur chaque mot)
+    // C'est LE filet de sécurité ultime contre les doublons
     try {
-      existing = await this.findAssetUserByEmail(user.email, normalizedDisplayName);
+      const searchUrl = this.buildAssetsUrl('object/aql');
+      const nameParts = normalizedDisplayName.split(' ').filter(p => p.length > 1);
+      // Construire une requete qui cherche chaque partie du nom
+      // Ex: "Amandine FRANCHI" -> LIKE "%Amandine%" AND LIKE "%FRANCHI%"
+      const likeConditions = nameParts.map(p => `"Name" LIKE "%${p}%"`).join(' AND ');
+      const aqlQuery = `objectType = "Users" AND ${likeConditions}`;
+
+      const response = await firstValueFrom(
+        this.httpService.post<{ values: JiraAssetObjectResponse[] }>(
+          searchUrl,
+          { qlQuery: aqlQuery, maxResults: 10, includeAttributes: true },
+          { headers: this.getAuthHeaders() },
+        ),
+      );
+      const candidates = response.data.values || [];
+      if (candidates.length > 0) {
+        // Prendre le plus ancien (ID le plus petit) en cas de doublons existants
+        existing = candidates.sort((a, b) => parseInt(a.id) - parseInt(b.id))[0];
+        this.logger.log(`ℹ️ Utilisateur Asset trouvé par AQL LIKE: "${lockKey}" (ID: ${existing.id}), création annulée.`);
+        // Mettre en cache et dans le registre pour les prochains appels
+        this.userCache.set(lockKey, { user: existing, expiresAt: Date.now() + this.USER_CACHE_TTL_MS });
+        this.userRegistry.set(lockKey, existing);
+        return existing;
+      }
     } catch (searchError: any) {
-      this.logger.error(`❌ Erreur lors de la recherche préalable pour "${lockKey}": ${searchError.message}. Création bloquée.`);
-      // On ne peut pas vérifier l'existence → on ne crée pas pour éviter un doublon
+      this.logger.error(`❌ Erreur recherche préalable pour "${lockKey}": ${searchError.message}. Création bloquée.`);
       return null;
     }
-
-    if (existing) {
-      this.logger.log(`ℹ️ L'utilisateur Asset "${lockKey}" existe déjà (ID: ${existing.id}), création annulée.`);
-      // Mettre en cache pour les prochains appels dans cette session
-      this.userCache.set(lockKey, { user: existing, expiresAt: Date.now() + this.USER_CACHE_TTL_MS });
-      return existing;
-    }
-
     // SÉCURITÉ 2 : Créer l'utilisateur
     try {
       this.logger.log(`👤 Création de l'utilisateur Asset: ${user.email} (${normalizedDisplayName})`);
