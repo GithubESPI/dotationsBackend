@@ -36,6 +36,7 @@ interface JiraAssetObject {
 export interface JiraAssetObjectResponse {
   id: string;
   objectKey: string;
+  label?: string;   // Nom affiché (ex: "Alice CARTIER"), retourné par l'API Jira Assets
   objectTypeId: string;
   objectType: {
     id: string;
@@ -61,14 +62,23 @@ export class JiraAssetService {
   private readonly email: string;
   private readonly emailAssets: string;
 
-  // Verrou de déduplication en mémoire : clé = email normalisé OU nom normalisé
+  // Verrou de déduplication en mémoire : clé = nom normalisé
   // Empêche 2 appels parallèles de créer le même utilisateur Asset simultanément
   private readonly userCreationLocks = new Map<string, Promise<JiraAssetObjectResponse | null>>();
 
   // Cache court terme des utilisateurs Asset trouvés (TTL 60 secondes)
-  // Évite de multiples recherches API pour le même utilisateur lors d'une synchro massive
   private readonly userCache = new Map<string, { user: JiraAssetObjectResponse; expiresAt: number }>();
   private readonly USER_CACHE_TTL_MS = 60_000; // 60 secondes
+
+  // ============================================================
+  // Registre global de TOUS les users Jira chargés en mémoire
+  // Clé = nom normalisé (minuscules, sans espaces) pour comparaison JS insensible à la casse
+  // Chargé UNE SEULE FOIS par session de synchro, élimine 100% les race conditions et
+  // les problèmes de sensibilité à la casse des requêtes AQL Jira
+  // ============================================================
+  private userRegistry = new Map<string, JiraAssetObjectResponse>();
+  private userRegistryLoadedAt: number = 0;
+  private readonly USER_REGISTRY_TTL_MS = 5 * 60_000; // 5 minutes
 
   constructor(
     private readonly configService: ConfigService,
@@ -121,75 +131,143 @@ export class JiraAssetService {
   }
 
   /**
+   * Charger TOUS les utilisateurs Jira Assets en mémoire une seule fois.
+   * Construit un registre indexé par nom normalisé (minuscules, sans espaces)
+   * pour une comparaison JavaScript fiable et insensible à la casse.
+   */
+  async loadUserRegistry(): Promise<void> {
+    const now = Date.now();
+    if (this.userRegistryLoadedAt > 0 && (now - this.userRegistryLoadedAt) < this.USER_REGISTRY_TTL_MS) {
+      this.logger.log(`📦 Registre utilisateurs déjà chargé (${this.userRegistry.size} users, valide encore ${Math.round((this.USER_REGISTRY_TTL_MS - (now - this.userRegistryLoadedAt)) / 1000)}s)`);
+      return;
+    }
+
+    this.logger.log(`🔄 Chargement du registre global des utilisateurs Jira Assets...`);
+    try {
+      const searchUrl = this.buildAssetsUrl('object/aql');
+      const allUsers: JiraAssetObjectResponse[] = [];
+      let startAt = 0;
+      const pageSize = 100;
+
+      while (true) {
+        const response = await firstValueFrom(
+          this.httpService.post<{ values: JiraAssetObjectResponse[]; total?: number }>(
+            searchUrl,
+            { qlQuery: `objectType = "Users"` },
+            {
+              params: { startAt, maxResults: pageSize, includeAttributes: true },
+              headers: this.getAuthHeaders(),
+            },
+          ),
+        );
+        const page = response.data.values || [];
+        allUsers.push(...page);
+        if (page.length < pageSize) break;
+        startAt += pageSize;
+      }
+
+      // Vider et reconstruire le registre
+      this.userRegistry.clear();
+      for (const u of allUsers) {
+        // L'API Jira Assets retourne un champ "label" = le nom affiché de l'objet (ex: "Alice CARTIER")
+        // C'est ce champ qui correspond au displayName Office 365
+        const rawLabel: string = (u as any).label || u.objectKey || '';
+
+        // On indexe par le nom normalisé (sans espaces, minuscules)
+        // pour une comparaison JS robuste quel que soit la casse utilisée lors de la création
+        if (rawLabel) {
+          const labelKey = rawLabel.replace(/\s+/g, '').toLowerCase();
+          if (!this.userRegistry.has(labelKey)) {
+            this.userRegistry.set(labelKey, u);
+          }
+        }
+
+        // Aussi indexer chaque valeur textuelle des attributs comme clé alternative
+        for (const attr of u.attributes || []) {
+          const val = attr.objectAttributeValues?.[0]?.value;
+          if (val && typeof val === 'string' && val.length > 2 && !val.includes('@')) {
+            const attrKey = val.replace(/\s+/g, '').toLowerCase();
+            if (!this.userRegistry.has(attrKey)) {
+              this.userRegistry.set(attrKey, u);
+            }
+          }
+        }
+      }
+
+      this.userRegistryLoadedAt = Date.now();
+      this.logger.log(`✅ Registre chargé: ${this.userRegistry.size} entrées pour ${allUsers.length} utilisateurs`);
+    } catch (err: any) {
+      this.logger.error(`❌ Erreur chargement registre utilisateurs: ${err.message}`);
+      // Ne pas bloquer la synchro si le registre est temporairement inaccessible
+    }
+  }
+
+  /**
+   * Invalider le registre (utilisé après une création d'utilisateur)
+   */
+  private invalidateUserRegistry(): void {
+    this.userRegistryLoadedAt = 0;
+    this.userCache.clear();
+  }
+
+  /**
    * Rechercher un objet Utilisateur dans Jira Assets par Nom Complet
-   * (Les objets Users dans Jira n'ont pas de champ Email - on compare sur le nom complet Office 365)
+   * Utilise le registre en mémoire (chargé une fois par synchro) pour une
+   * comparaison JS insensible à la casse et aux espaces.
    */
   async findAssetUserByEmail(email: string, displayName?: string): Promise<JiraAssetObjectResponse | null> {
-    // La clé de comparaison est TOUJOURS le displayName normalisé (sans espaces multiples, sans casse)
-    // On utilise l'email uniquement comme fallback de la clé de cache interne
     const normalizedDisplayName = displayName?.replace(/\s+/g, ' ').trim();
-    const normalizedEmail = email?.trim().toLowerCase();
     
-    // Il faut au minimum un displayName pour chercher dans Jira (pas d'email dans le schéma Asset)
-    if (!normalizedDisplayName && !normalizedEmail) return null;
+    if (!normalizedDisplayName && !email) return null;
 
-    // Clé de cache = nom sans espaces en minuscules (plus stable que l'email)
-    const cacheKey = normalizedDisplayName
+    // Clé de recherche = nom sans espaces, minuscules
+    const searchKey = normalizedDisplayName
       ? normalizedDisplayName.replace(/\s+/g, '').toLowerCase()
-      : normalizedEmail!;
+      : email.trim().toLowerCase().replace(/[@.]/g, '');
 
-    // Vérifier le cache d'abord
-    const cached = this.userCache.get(cacheKey);
+    // 1. Vérifier le cache court terme d'abord
+    const cached = this.userCache.get(searchKey);
     if (cached && cached.expiresAt > Date.now()) {
       this.logger.debug(`📦 Utilisateur trouvé en cache: "${normalizedDisplayName}" (ID: ${cached.user.id})`);
       return cached.user;
     }
 
-    this.logger.debug(`🔍 Recherche de l'utilisateur Asset par nom: "${normalizedDisplayName}"`);
-    
+    // 2. Vérifier le registre global (comparaison JS, insensible à la casse)
+    if (this.userRegistry.size > 0) {
+      const fromRegistry = this.userRegistry.get(searchKey);
+      if (fromRegistry) {
+        this.logger.debug(`📊 Utilisateur trouvé dans le registre: "${normalizedDisplayName}" (ID: ${fromRegistry.id})`);
+        this.userCache.set(searchKey, { user: fromRegistry, expiresAt: Date.now() + this.USER_CACHE_TTL_MS });
+        return fromRegistry;
+      }
+      // Pas dans le registre = n'existe pas (le registre est exhaustif)
+      this.logger.debug(`🔍 "${normalizedDisplayName}" absent du registre (${this.userRegistry.size} users chargés)`);
+      return null;
+    }
+
+    // 3. Fallback : registre pas encore chargé → requête AQL directe
+    this.logger.debug(`🔍 Recherche AQL directe pour: "${normalizedDisplayName}" (registre non chargé)`);
     const objectTypeName = 'Users';
-
     try {
-      // Les objets Users dans Jira n'ont pas d'email -> on cherche uniquement par Nom
-      // On construit plusieurs variantes pour être robuste aux différences de casse et d'espaces
       const queryParts: string[] = [];
-
       if (normalizedDisplayName) {
-        // 1. Correspondance exacte (la plus précise)
         queryParts.push(`"Name" = "${normalizedDisplayName}"`);
-
-        // 2. Wildcard pour absorber les espaces multiples ex: "Alice  CARTIER" vs "Alice CARTIER"
         const wildcardName = normalizedDisplayName.replace(/\s+/g, '%');
         queryParts.push(`"Name" LIKE "%${wildcardName}%"`);
-
-        // 3. Recherche insensible à la casse (via LIKE en minuscules)
-        queryParts.push(`"Name" LIKE "${normalizedDisplayName.toLowerCase()}"`);
-        queryParts.push(`"Name" LIKE "${normalizedDisplayName.toUpperCase()}"`);
       }
-
       if (queryParts.length === 0) return null;
 
       const query = `objectType = "${objectTypeName}" AND (${queryParts.join(' OR ')})`;
-      this.logger.debug(`🔍 AQL Query: ${query}`);
-
       const results = await this.searchAssetsInJira(objectTypeName, query, 20);
 
       if (results.length > 0) {
-        // En cas de doublons, on prend le plus ancien (ID le plus petit) pour la stabilité
         const bestMatch = results.sort((a, b) => parseInt(a.id) - parseInt(b.id))[0];
-        this.logger.debug(`✅ Utilisateur Asset trouvé: ${bestMatch.objectKey} (ID: ${bestMatch.id})`);
-        if (results.length > 1) {
-          this.logger.warn(`⚠️ ${results.length} doublons trouvés pour "${normalizedDisplayName}". Utilisation du plus ancien.`);
-        }
-        // Mettre en cache pour toute la durée de la synchro
-        this.userCache.set(cacheKey, { user: bestMatch, expiresAt: Date.now() + this.USER_CACHE_TTL_MS });
+        this.userCache.set(searchKey, { user: bestMatch, expiresAt: Date.now() + this.USER_CACHE_TTL_MS });
         return bestMatch;
       }
-
       return null;
     } catch (error: any) {
-      this.logger.error(`❌ Erreur lors de la recherche de l'utilisateur Asset "${normalizedDisplayName}": ${error.message}`);
-      // On propage l'erreur pour bloquer toute création en cas de problème API
+      this.logger.error(`❌ Erreur recherche utilisateur "${normalizedDisplayName}": ${error.message}`);
       throw error;
     }
   }
@@ -295,6 +373,8 @@ export class JiraAssetService {
       this.logger.log(`✅ Utilisateur Asset créé avec succès: ${result.objectKey} (ID: ${result.id})`);
       // Mettre en cache le nouvel utilisateur créé
       this.userCache.set(lockKey, { user: result, expiresAt: Date.now() + this.USER_CACHE_TTL_MS });
+      // Invalider le registre pour forcer un rechargement au prochain cycle
+      this.invalidateUserRegistry();
       return result;
     } catch (error: any) {
       this.logger.error(`❌ Impossible de créer l'utilisateur Asset ${user.email}: ${error.message}`);
@@ -947,6 +1027,13 @@ export class JiraAssetService {
       if (!attributeMapping?.serialNumberAttrId) {
         this.logger.warn(`⚠️ Numéro de série non détecté. Tentative de synchronisation avec les attributs disponibles...`);
       }
+
+      // ============================================================
+      // PRÉCHARGER TOUS LES USERS JIRA EN MÉMOIRE avant la synchro
+      // Garantit une comparaison JS insensible à la casse/espaces,
+      // sans dépendre des requêtes AQL LIKE (case-sensitive dans Jira)
+      // ============================================================
+      await this.loadUserRegistry();
 
       // Synchroniser chaque équipement par lots réduits pour limiter les race conditions
       // sur la création des utilisateurs Asset (duplication). Le verrou en mémoire gère
