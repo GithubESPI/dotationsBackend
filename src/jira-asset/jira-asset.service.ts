@@ -234,9 +234,42 @@ export class JiraAssetService {
 
     // 2. Vérifier le registre global (comparaison JS, insensible à la casse)
     if (this.userRegistry.size > 0) {
-      const fromRegistry = this.userRegistry.get(searchKey);
+      // 2a. Correspondance exacte (nom complet sans espaces)
+      let fromRegistry = this.userRegistry.get(searchKey);
+
+      // 2b. Si pas trouvé, essayer les variantes partielles
+      // Cas : Jira stocke "ADA" mais O365 envoie "ADA DUPONT" → on cherche chaque partie
+      if (!fromRegistry && normalizedDisplayName) {
+        const parts = normalizedDisplayName.split(' ');
+
+        // Chercher chaque partie individuelle (nom seul, prénom seul)
+        for (const part of parts) {
+          const partKey = part.replace(/\\s+/g, '').toLowerCase();
+          if (partKey.length > 2) {
+            const candidate = this.userRegistry.get(partKey);
+            if (candidate) {
+              this.logger.debug(`📊 Match partiel "${part}" → "${normalizedDisplayName}" (ID: ${candidate.id})`);
+              fromRegistry = candidate;
+              break;
+            }
+          }
+        }
+
+        // Chercher par suffixe (ex: "Prenom NOM" → clé "NOM" seul)
+        if (!fromRegistry && parts.length > 1) {
+          for (let i = 1; i < parts.length; i++) {
+            const combo = parts.slice(i).join('').toLowerCase();
+            const candidate = this.userRegistry.get(combo);
+            if (candidate) {
+              this.logger.debug(`📊 Match suffixe "${parts.slice(i).join(' ')}" → "${normalizedDisplayName}" (ID: ${candidate.id})`);
+              fromRegistry = candidate;
+              break;
+            }
+          }
+        }
+      }
+
       if (fromRegistry) {
-        this.logger.debug(`📊 Utilisateur trouvé dans le registre: "${normalizedDisplayName}" (ID: ${fromRegistry.id})`);
         this.userCache.set(searchKey, { user: fromRegistry, expiresAt: Date.now() + this.USER_CACHE_TTL_MS });
         return fromRegistry;
       }
@@ -245,7 +278,7 @@ export class JiraAssetService {
       return null;
     }
 
-    // 3. Fallback : registre pas encore chargé → requête AQL directe
+// 3. Fallback : registre pas encore chargé → requête AQL directe
     this.logger.debug(`🔍 Recherche AQL directe pour: "${normalizedDisplayName}" (registre non chargé)`);
     const objectTypeName = 'Users';
     try {
@@ -371,10 +404,10 @@ export class JiraAssetService {
 
       const result = await this.createAssetInJira(objectType.id, attributesToCreate);
       this.logger.log(`✅ Utilisateur Asset créé avec succès: ${result.objectKey} (ID: ${result.id})`);
-      // Mettre en cache le nouvel utilisateur créé
+      // Mettre en cache ET dans le registre le nouvel utilisateur créé
       this.userCache.set(lockKey, { user: result, expiresAt: Date.now() + this.USER_CACHE_TTL_MS });
-      // Invalider le registre pour forcer un rechargement au prochain cycle
-      this.invalidateUserRegistry();
+      // Ajouter au registre existant au lieu de l'invalider (plus efficace)
+      this.userRegistry.set(lockKey, result);
       return result;
     } catch (error: any) {
       this.logger.error(`❌ Impossible de créer l'utilisateur Asset ${user.email}: ${error.message}`);
@@ -1161,6 +1194,12 @@ export class JiraAssetService {
       this.logger.log(`📋 Types d'équipements à synchroniser: ${equipmentTypeNames.join(', ')}`);
       this.logger.log(`🚫 Types de référence exclus: ${REFERENCE_OBJECT_TYPES.join(', ')}`);
 
+      // ============================================================
+      // PRÉCHARGER LE REGISTRE DES USERS UNE SEULE FOIS pour tout le cycle
+      // Garantit des lookups insensibles à la casse pour tous les types d'équipements
+      // ============================================================
+      await this.loadUserRegistry();
+
       // Synchroniser chaque type d'équipement
       for (const objectTypeName of equipmentTypeNames) {
         const equipmentType = getEquipmentType(objectTypeName);
@@ -1895,6 +1934,9 @@ export class JiraAssetService {
       if (user && user.email) {
         // 1. Chercher si l'utilisateur existe dans les OBJETS Assets "Users"
         // ATTENTION: Pour les champs de type "Object", il est souvent préférable d'utiliser l'ID interne plutôt que la Key
+        // S'assurer que le registre est chargé pour lookup insensible à la casse
+        await this.loadUserRegistry();
+
         let assetUser = await this.findAssetUserByEmail(user.email, user.displayName);
         let userId = assetUser ? assetUser.id : null;
 
