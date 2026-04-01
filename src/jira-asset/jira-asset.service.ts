@@ -161,27 +161,25 @@ export class JiraAssetService {
         const page = response.data.values || [];
         allUsers.push(...page);
         if (page.length < pageSize) break;
+        
         startAt += pageSize;
       }
-
       this.userRegistry.clear();
+      // On sauvegarde aussi une liste dédupliquée
+      const uniqueUsers = new Map<string, JiraAssetObjectResponse>();
+      
       for (const u of allUsers) {
-        // Index 1: label retourné par l'API Jira (nom affiché, ex: "Alice CARTIER")
+        uniqueUsers.set(u.id, u);
         const rawLabel: string = (u as any).label || '';
         if (rawLabel && rawLabel.trim().length > 1) {
           const k = rawLabel.replace(/\s+/g, '').toLowerCase();
           if (!this.userRegistry.has(k)) this.userRegistry.set(k, u);
         }
-
-        // Index 2: valeurs textuelles de chaque attribut (Nom, Prénoms) - source de vérité
-        // retourne uniquement si includeAttributes: true est dans le corps POST
         for (const attr of u.attributes || []) {
           const val = attr.objectAttributeValues?.[0]?.value;
           if (val && typeof val === 'string' && val.trim().length > 1) {
-            // Indexer la valeur complète ("Alice CARTIER" -> "alicecartier")
             const k = val.replace(/\s+/g, '').toLowerCase();
             if (!this.userRegistry.has(k)) this.userRegistry.set(k, u);
-            // Indexer chaque partie séparément ("Alice" et "CARTIER" séparément)
             val.split(' ').forEach(part => {
               const pk = part.toLowerCase().trim();
               if (pk.length > 2 && !this.userRegistry.has(pk)) {
@@ -191,6 +189,10 @@ export class JiraAssetService {
           }
         }
       }
+
+      // this.userList = Array.from(uniqueUsers.values());
+      this.userRegistryLoadedAt = Date.now();
+
 
       this.userRegistryLoadedAt = Date.now();
       this.logger.log(`✅ Registre chargé: ${this.userRegistry.size} entrées pour ${allUsers.length} utilisateurs`);
@@ -342,55 +344,17 @@ export class JiraAssetService {
    */
   private async _doCreateAssetUser(
     user: { email: string; firstName: string; lastName: string; displayName: string },
-    normalizedDisplayName: string,
-    normalizedEmail: string,
+    normalizedDisplayName: string | undefined,
+    normalizedEmail: string | undefined,
     lockKey: string
   ): Promise<JiraAssetObjectResponse | null> {
-    // SÉCURITÉ 1 : Vérification multi-niveaux de l'existence de l'utilisateur
-    // Niveau A : Registre en mémoire (rapide) - le charger si vide
-    if (this.userRegistry.size === 0) {
-      await this.loadUserRegistry();
-    }
-
-    // Niveau B : Recherche dans le registre par clé normalisée
-    let existing: JiraAssetObjectResponse | null = null;
-    const regResult = this.userRegistry.get(lockKey);
-    if (regResult) {
-      this.logger.log(`ℹ️ Utilisateur Asset trouvé dans le registre: "${lockKey}" (ID: ${regResult.id}), création annulée.`);
-      this.userCache.set(lockKey, { user: regResult, expiresAt: Date.now() + this.USER_CACHE_TTL_MS });
-      return regResult;
-    }
-
-    // Niveau C : Recherche AQL directe robuste (insensible à la casse via LIKE sur chaque mot)
-    // C'est LE filet de sécurité ultime contre les doublons
-    try {
-      const searchUrl = this.buildAssetsUrl('object/aql');
-      const nameParts = normalizedDisplayName.split(' ').filter(p => p.length > 1);
-      // Construire une requete qui cherche chaque partie du nom
-      // Ex: "Amandine FRANCHI" -> LIKE "%Amandine%" AND LIKE "%FRANCHI%"
-      const likeConditions = nameParts.map(p => `"Name" LIKE "%${p}%"`).join(' AND ');
-      const aqlQuery = `objectType = "Users" AND ${likeConditions}`;
-
-      const response = await firstValueFrom(
-        this.httpService.post<{ values: JiraAssetObjectResponse[] }>(
-          searchUrl,
-          { qlQuery: aqlQuery, maxResults: 10, includeAttributes: true },
-          { headers: this.getAuthHeaders() },
-        ),
-      );
-      const candidates = response.data.values || [];
-      if (candidates.length > 0) {
-        // Prendre le plus ancien (ID le plus petit) en cas de doublons existants
-        existing = candidates.sort((a, b) => parseInt(a.id) - parseInt(b.id))[0];
-        this.logger.log(`ℹ️ Utilisateur Asset trouvé par AQL LIKE: "${lockKey}" (ID: ${existing.id}), création annulée.`);
-        // Mettre en cache et dans le registre pour les prochains appels
-        this.userCache.set(lockKey, { user: existing, expiresAt: Date.now() + this.USER_CACHE_TTL_MS });
-        this.userRegistry.set(lockKey, existing);
-        return existing;
-      }
-    } catch (searchError: any) {
-      this.logger.error(`❌ Erreur recherche préalable pour "${lockKey}": ${searchError.message}. Création bloquée.`);
-      return null;
+    // SÉCURITÉ 1 : Revérification via le mécanisme robuste de findAssetUserByEmail
+    // C'est le seul endroit où l'on garantit qu'on ne duplique pas (l'AQL échoue à cause du labeling "Nom").
+    const doubleCheck = await this.findAssetUserByEmail(user.email, user.displayName || normalizedDisplayName);
+    if (doubleCheck) {
+      this.logger.log(`ℹ️ Utilisateur Asset double-checké en mémoire: "${lockKey}" (ID: ${doubleCheck.id}), création annulée.`);
+      this.userCache.set(lockKey, { user: doubleCheck, expiresAt: Date.now() + this.USER_CACHE_TTL_MS });
+      return doubleCheck;
     }
     // SÉCURITÉ 2 : Créer l'utilisateur
     try {
