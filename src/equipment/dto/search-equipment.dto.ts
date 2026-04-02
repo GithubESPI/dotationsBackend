@@ -9,10 +9,15 @@ export class SearchEquipmentDto {
   @IsString()
   query?: string;
 
-  @ApiPropertyOptional({ description: 'Filtrer par type de matériel', enum: EquipmentType })
+  @ApiPropertyOptional({ description: 'Filtrer uniquement les équipements avec données manquantes' })
   @IsOptional()
-  @IsEnum(EquipmentType)
-  type?: EquipmentType;
+  @Type(() => Boolean)
+  onlyIncomplete?: boolean;
+
+  @ApiPropertyOptional({ description: 'Filtrer par type de matériel (Enum MongoDB ou Nom Jira)' })
+  @IsOptional()
+  @IsString()
+  type?: string;
 
   @ApiPropertyOptional({ description: 'Filtrer par statut', enum: EquipmentStatus })
   @IsOptional()

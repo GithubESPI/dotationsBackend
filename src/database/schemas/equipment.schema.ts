@@ -30,6 +30,12 @@ export class Equipment {
   @Prop()
   internalId?: string; // N° d'inventaire interne
 
+  @Prop()
+  objectTypeName?: string; // Nom du type d'objet Jira (ex: Laptop, Chromebook)
+
+  @Prop({ default: false })
+  isMissingSerialNumber?: boolean; // Vrai si l'asset Jira n'avait pas de N° de série
+
   @Prop({ required: true, enum: EquipmentType })
   type: EquipmentType;
 
@@ -84,4 +90,5 @@ EquipmentSchema.index({ jiraAssetId: 1 });
 EquipmentSchema.index({ status: 1 });
 EquipmentSchema.index({ currentUserId: 1 });
 EquipmentSchema.index({ type: 1 });
+EquipmentSchema.index({ objectTypeName: 1 });
 

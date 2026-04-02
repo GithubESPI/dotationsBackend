@@ -50,14 +50,23 @@ export class EquipmentService {
    * Rechercher des matériels avec filtres et pagination
    */
   async search(searchDto: SearchEquipmentDto) {
-    const { query, type, status, brand, location, currentUserId, page = 1, limit = 20 } = searchDto;
+    const { query, type, status, brand, location, currentUserId, onlyIncomplete, page = 1, limit = 20 } = searchDto;
     const skip = (page - 1) * limit;
 
     // Construire le filtre
     const filter: any = {};
 
+    if (onlyIncomplete === true || onlyIncomplete === 'true' as any) {
+      filter.isMissingSerialNumber = true;
+    }
+
     if (type) {
-      filter.type = type;
+      if (Object.values(EquipmentType).includes(type as EquipmentType)) {
+        filter.type = type;
+      } else {
+        // Recherche par type spécifique Jira (Object Type Name)
+        filter.objectTypeName = type;
+      }
     }
 
     if (status) {
@@ -84,6 +93,9 @@ export class EquipmentService {
         { serialNumber: { $regex: query, $options: 'i' } },
         { internalId: { $regex: query, $options: 'i' } },
         { jiraAssetId: { $regex: query, $options: 'i' } },
+        { 'jiraAttributes.Name': { $regex: query, $options: 'i' } },
+        { 'jiraAttributes.Modèle': { $regex: query, $options: 'i' } },
+        { 'jiraAttributes.Model': { $regex: query, $options: 'i' } },
       ];
     }
 

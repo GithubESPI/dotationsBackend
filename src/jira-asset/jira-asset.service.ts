@@ -1075,17 +1075,15 @@ export class JiraAssetService {
             );
             const serialNumber = serialNumberAttr?.objectAttributeValues?.[0]?.value?.toString();
 
-            if (!serialNumber || serialNumber.trim() === '') {
-              results.skipped++;
-              this.logger.debug(`⚠️ Asset ${jiraAsset.id} ignoré: numéro de série manquant`);
-              return;
+            if (!serialNumber || serialNumber?.trim() === '') {
+              this.logger.debug(`⚠️ Asset ${jiraAsset.id} sans numéro de série: utilisation du fallback.`);
             }
 
             // Vérifier si l'équipement existe déjà
             const existingBefore = await this.equipmentModel.findOne({
               $or: [
                 { jiraAssetId: jiraAsset.id },
-                { serialNumber: serialNumber.trim() },
+                { serialNumber: serialNumber?.trim() },
               ],
             }).exec();
 
@@ -1558,7 +1556,12 @@ export class JiraAssetService {
       });
     }
 
-    const serialNumber = getAttributeValue(attributeMapping.serialNumberAttrId);
+    let serialNumber = getAttributeValue(attributeMapping.serialNumberAttrId);
+    let isMissingSerialNumber = false;
+    if (!serialNumber || serialNumber.trim() === '') {
+      serialNumber = `MANQUANT_${jiraAsset.objectKey}`;
+      isMissingSerialNumber = true;
+    }
     const brand = getAttributeValue(attributeMapping.brandAttrId);
     const model = getAttributeValue(attributeMapping.modelAttrId);
     const type = getAttributeValue(attributeMapping.typeAttrId);
@@ -1574,9 +1577,7 @@ export class JiraAssetService {
       }
     }
 
-    if (!serialNumber) {
-      throw new BadRequestException('Le numéro de série est requis pour synchroniser un équipement');
-    }
+    
 
     // Chercher l'équipement existant par jiraAssetId ou serialNumber
     let equipment = await this.equipmentModel.findOne({
@@ -1594,6 +1595,8 @@ export class JiraAssetService {
       brand: brand || 'Inconnu',
       model: model || 'Inconnu',
       type: equipmentType,
+      objectTypeName: (jiraAsset as any).objectType?.name,
+      isMissingSerialNumber,
       jiraAssetId,
       status: this.mapJiraStatusToEquipmentStatus(status) || EquipmentStatus.EN_STOCK,
       jiraAttributes, // Sauvegarder tous les attributs Jira
