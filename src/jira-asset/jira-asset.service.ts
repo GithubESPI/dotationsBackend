@@ -221,9 +221,9 @@ export class JiraAssetService {
     if (!normalizedDisplayName && !email) return null;
 
     // Clé de recherche = nom sans espaces, minuscules
-    const searchKey = normalizedDisplayName
-      ? normalizedDisplayName.replace(/\s+/g, '').toLowerCase()
-      : email.trim().toLowerCase().replace(/[@.]/g, '');
+    const searchKey = email
+      ? email.trim().toLowerCase()
+      : (normalizedDisplayName ? normalizedDisplayName.replace(/\s+/g, '').toLowerCase() : '');
 
     // 1. Vérifier le cache court terme d'abord
     const cached = this.userCache.get(searchKey);
@@ -283,6 +283,9 @@ export class JiraAssetService {
     const objectTypeName = 'Users';
     try {
       const queryParts: string[] = [];
+      if (email) {
+        queryParts.push(`"Email" = "${email}"`);
+      }
       if (normalizedDisplayName) {
         queryParts.push(`"Name" = "${normalizedDisplayName}"`);
         const wildcardName = normalizedDisplayName.replace(/\s+/g, '%');
@@ -312,7 +315,7 @@ export class JiraAssetService {
     // Clé unique basée sur le NOM COMPLET normalisé (sans espaces, minuscules)
     // C'est la seule donnée fiable : Jira n'a pas de champ email
     const normalizedDisplayName = user.displayName?.replace(/\s+/g, ' ').trim();
-    const lockKey = normalizedDisplayName?.replace(/\s+/g, '').toLowerCase() || user.email?.trim().toLowerCase() || 'unknown';
+    const lockKey = user.email?.trim().toLowerCase() || normalizedDisplayName?.replace(/\s+/g, '').toLowerCase() || 'unknown';
 
     // 1. Vérifier le cache d'abord (résultat immédiat, pas d'appel API)
     const cached = this.userCache.get(lockKey);
