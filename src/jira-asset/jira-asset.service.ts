@@ -1067,7 +1067,7 @@ export class JiraAssetService {
       const batchSize = 10;
       for (let i = 0; i < jiraAssets.length; i += batchSize) {
         const batch = jiraAssets.slice(i, i + batchSize);
-        const batchPromises = batch.map(async (jiraAsset) => {
+        for (const jiraAsset of batch) {
           try {
             // Extraire le numéro de série pour vérification
             const serialNumberAttr = jiraAsset.attributes.find(
@@ -1111,9 +1111,9 @@ export class JiraAssetService {
             results.errors++;
             this.logger.error(`❌ Erreur lors de la synchronisation de l'asset ${jiraAsset.id}: ${error.message}`);
           }
-        });
+        }
 
-        await Promise.all(batchPromises);
+
         this.logger.log(`📊 Progression: ${Math.min(i + batchSize, jiraAssets.length)}/${jiraAssets.length} traités`);
       }
 
