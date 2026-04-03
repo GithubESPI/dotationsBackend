@@ -1852,29 +1852,32 @@ export class JiraAssetService {
         }
 
         // 3b. Détecter l'attribut Utilisateur (on cherche de préférence un lien vers un Objet Asset "User")
-        // on cherche un champ qui s'appelle 'user', 'utilisateur', etc. BUT with Type=1 (Object) preference
+        // on cherche un champ qui s'appelle 'utilisateur', 'user', etc. BUT with Type=1 (Object) preference
         const userAttribute = attributesDetails.find((a: any) =>
-          ['user', 'utilisateur', 'users', 'utilisateurs', 'collaborateur', 'employe'].includes(a.name.toLowerCase())
+          ['utilisateur', 'user', 'users', 'utilisateurs', 'collaborateur', 'employe'].includes(a.name.toLowerCase())
         );
 
-        // Si on a plusieurs candidats, on privilégie celui de type 1 (Object) car on veut lier un Asset User
-        const objectUserAttr = attributesDetails.find((a: any) =>
-          ['user', 'utilisateur', 'users'].includes(a.name.toLowerCase()) && a.type === 1
+        // Si on a plusieurs candidats, on privilégie "user" (Nom exact de l'Objet dans votre schéma)
+        const specificUserAttr = attributesDetails.find((a: any) =>
+          a.name.toLowerCase() === 'user' && a.type === 1
+        );
+
+        // Fallback sur "Utilisateur" s'il n'y a pas "user"
+        const fallbackUserAttr = attributesDetails.find((a: any) =>
+          a.name.toLowerCase() === 'utilisateur' && a.type === 1
         );
 
         // Si on trouve un attribut type Object, c'est celui-là qu'on veut !
-        const selectedUserAttr = objectUserAttr || userAttribute;
+        const selectedUserAttr = specificUserAttr || fallbackUserAttr || userAttribute;
 
         if (selectedUserAttr) {
           attributeMapping.assignedUserAttrId = selectedUserAttr.id;
           this.logger.debug(`   ✅ Utilisateur détecté: ID ${selectedUserAttr.id} (Type: ${selectedUserAttr.type}, Nom: ${selectedUserAttr.name})`);
         }
 
-
-
         if (!attributeMapping.assignedUserAttrId && detected.assignedUserAttrId) {
           attributeMapping.assignedUserAttrId = detected.assignedUserAttrId;
-          this.logger.debug(`   ✅ Utilisateur détecté: ID ${detected.assignedUserAttrId}`);
+          this.logger.debug(`   ✅ Utilisateur détecté via fallback: ID ${detected.assignedUserAttrId}`);
         }
 
       } catch (error: any) {
@@ -1963,12 +1966,11 @@ export class JiraAssetService {
     this.logger.debug(`📤 Payload mise à jour Jira (Status): ${JSON.stringify(attributes[0])}`);
 
     // Mettre à jour l'utilisateur affecté si l'attribut est configuré
+    let jiraUserIdForLog: string | null = null;
     if (attributeMapping.assignedUserAttrId) {
       const user = equipment.currentUserId as any; // Cast car populate
       if (user && user.email) {
         // 1. Chercher si l'utilisateur existe dans les OBJETS Assets "Users"
-        // ATTENTION: Pour les champs de type "Object", il est souvent préférable d'utiliser l'ID interne plutôt que la Key
-        // S'assurer que le registre est chargé pour lookup insensible à la casse
         await this.loadUserRegistry();
 
         let assetUser = await this.findAssetUserByEmail(user.email, user.displayName);
@@ -1988,6 +1990,7 @@ export class JiraAssetService {
         }
 
         if (userId) {
+          jiraUserIdForLog = userId;
           // L'attribut "Utilisateur" dans Laptop attend une référence à un objet Users
           attributes.push({
             objectTypeAttributeId: attributeMapping.assignedUserAttrId,
@@ -2019,7 +2022,9 @@ export class JiraAssetService {
       await this.updateAssetInJira(equipment.jiraAssetId, validAttributes as any);
       equipment.lastSyncedAt = new Date();
       await equipment.save();
-      this.logger.log(`✅ Statut Jira mis à jour pour l'équipement ${equipment.serialNumber} (Status: ${this.mapEquipmentStatusToJira(equipment.status)})`);
+      this.logger.log(`✅ Statut Jira mis à jour pour l'équipement ${equipment.serialNumber}`);
+      this.logger.debug(`📊 Attributs utilisés: StatusID=${attributeMapping.statusAttrId}, UserID=${attributeMapping.assignedUserAttrId}, NameID=${fullAttributeMapping.nameAttrId}, InternalID=${fullAttributeMapping.internalIdAttrId}`);
+      this.logger.debug(`📤 Payload final: Status="${this.mapEquipmentStatusToJira(equipment.status)}", UserID=${jiraUserIdForLog || 'Libéré'}`);
       // 3. Rafraîchir les données locales depuis Jira pour s'assurer que tout est synchro
       // Cela permet de récupérer les libellés exacts (ex: Statut, Utilisateur) tels qu'ils sont dans Jira
       try {
@@ -2139,12 +2144,12 @@ export class JiraAssetService {
     if (!jiraStatus) return undefined;
 
     const statusMap: Record<string, EquipmentStatus> = {
-      // Statuts réels dans Jira
+      // Statuts réels dans Jira (basé sur vos captures)
       'en stock': EquipmentStatus.EN_STOCK,
-      'disponible': EquipmentStatus.EN_STOCK,  // Ancien alias
-      'available': EquipmentStatus.EN_STOCK,   // Alias anglais
-      'affecté': EquipmentStatus.AFFECTE,
+      'en_stock': EquipmentStatus.EN_STOCK,
       'affecte': EquipmentStatus.AFFECTE,
+      'affecté': EquipmentStatus.AFFECTE,
+      'available': EquipmentStatus.EN_STOCK,
       'assigned': EquipmentStatus.AFFECTE,
       'en intervention': EquipmentStatus.EN_REPARATION,
       'en_reparation': EquipmentStatus.EN_REPARATION,
@@ -2168,14 +2173,14 @@ export class JiraAssetService {
    */
   private mapEquipmentStatusToJira(status: EquipmentStatus): string {
     const statusMap: Record<EquipmentStatus, string> = {
-      [EquipmentStatus.EN_STOCK]: 'En stock',
-      [EquipmentStatus.AFFECTE]: 'Affecté',
-      [EquipmentStatus.EN_REPARATION]: 'En intervention',
-      [EquipmentStatus.RESTITUE]: 'En stock',
-      [EquipmentStatus.PERDU]: 'Rebut',
-      [EquipmentStatus.DETRUIT]: 'Rebut',
+      [EquipmentStatus.EN_STOCK]: 'EN STOCK', // Valeur exacte dans votre Jira
+      [EquipmentStatus.AFFECTE]: 'AFFECTE',   // Valeur exacte dans votre Jira
+      [EquipmentStatus.EN_REPARATION]: 'EN INTERVENTION',
+      [EquipmentStatus.RESTITUE]: 'EN STOCK',
+      [EquipmentStatus.PERDU]: 'REBUT',
+      [EquipmentStatus.DETRUIT]: 'REBUT',
     };
 
-    return statusMap[status] || 'En stock';
+    return statusMap[status] || 'EN STOCK';
   }
 }
