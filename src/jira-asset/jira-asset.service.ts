@@ -787,6 +787,7 @@ export class JiraAssetService {
     statusAttrId?: string;
     internalIdAttrId?: string;
     assignedUserAttrId?: string;
+    nameAttrId?: string; // ID de l'attribut "Name" ou "Label"
   } {
     const mapping: any = {};
 
@@ -816,8 +817,12 @@ export class JiraAssetService {
           mapping.assignedUserAttrId = id;
         }
         // Internal ID
-        if (!mapping.internalIdAttrId && (lowerName === 'internal id' || lowerName === 'id interne' || lowerName === 'key')) {
+        if (!mapping.internalIdAttrId && (lowerName === 'internal id' || lowerName === 'id interne' || lowerName === 'numéro d\'inventaire' || lowerName === 'inventaire' || lowerName === 'key')) {
           mapping.internalIdAttrId = id;
+        }
+        // Name / Label (souvent l'ID 1 ou nommé Name)
+        if (!mapping.nameAttrId && (lowerName === 'name' || lowerName === 'label' || lowerName === 'nom' || id === '1')) {
+          mapping.nameAttrId = id;
         }
       }
     }
@@ -1879,6 +1884,20 @@ export class JiraAssetService {
 
     // Préparer un mapping complet pour le rafraîchissement
     const fullAttributeMapping: any = { ...attributeMapping };
+    
+    // S'assurer que le nom et l'ID interne sont détectés si nécessaire
+    if (!fullAttributeMapping.nameAttrId || !fullAttributeMapping.internalIdAttrId) {
+      try {
+        const asset = await this.getAssetFromJira(equipment.jiraAssetId);
+        const objectTypeName = asset.objectType.name;
+        const tempDefs = await this.getObjectTypeAttributes(objectTypeName);
+        const detected = this.detectAttributeIds(asset, tempDefs);
+        if (!fullAttributeMapping.nameAttrId) fullAttributeMapping.nameAttrId = detected.nameAttrId;
+        if (!fullAttributeMapping.internalIdAttrId) fullAttributeMapping.internalIdAttrId = detected.internalIdAttrId;
+      } catch (e) {
+        this.logger.warn(`⚠️ Impossible de détecter les attributs Nom/Interne: ${e.message}`);
+      }
+    }
 
     // Si on a manqué des attributs nécessaires pour le refresh (comme le serial number), on essaie de les détecter maintenant
     // On profite pour récupérer aussi la map des définitions d'attributs nécessaire pour syncEquipmentFromJira
@@ -1920,6 +1939,25 @@ export class JiraAssetService {
         objectAttributeValues: [{ value: this.mapEquipmentStatusToJira(equipment.status) }],
       },
     ];
+
+    // Ajouter le NOM formaté (Marque Modèle - Serial)
+    if (fullAttributeMapping.nameAttrId) {
+      const formattedName = `${equipment.brand} ${equipment.model} - ${equipment.serialNumber}`;
+      attributes.push({
+        objectTypeAttributeId: fullAttributeMapping.nameAttrId,
+        objectAttributeValues: [{ value: formattedName }],
+      });
+      this.logger.debug(`📤 Payload mise à jour Jira (Name): ${formattedName}`);
+    }
+
+    // Ajouter l'ID INTERNE si présent
+    if (fullAttributeMapping.internalIdAttrId && equipment.internalId) {
+      attributes.push({
+        objectTypeAttributeId: fullAttributeMapping.internalIdAttrId,
+        objectAttributeValues: [{ value: equipment.internalId }],
+      });
+      this.logger.debug(`📤 Payload mise à jour Jira (Internal ID): ${equipment.internalId}`);
+    }
 
     // Log du payload pour debug
     this.logger.debug(`📤 Payload mise à jour Jira (Status): ${JSON.stringify(attributes[0])}`);
