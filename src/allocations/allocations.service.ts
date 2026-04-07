@@ -486,5 +486,15 @@ export class AllocationsService {
       // Ne pas bloquer le processus appelant
     }
   }
+
+  /**
+   * Chercher une allocation active (en cours ou en retard) pour un équipement
+   */
+  async getActiveAllocationForEquipment(equipmentId: string): Promise<AllocationDocument | null> {
+    return this.allocationModel.findOne({
+      'equipments.equipmentId': new Types.ObjectId(equipmentId),
+      status: { $in: [AllocationStatus.EN_COURS, AllocationStatus.EN_RETARD] },
+    }).exec();
+  }
 }
 

@@ -103,17 +103,25 @@ export class PdfGeneratorService {
       .findByIdAndUpdate(allocationId, { documentId: savedDoc._id })
       .exec();
 
-    // Mettre à jour le profil utilisateur (Historique)
-    await this.connection.model('User').findByIdAndUpdate(user._id, {
-      $push: {
-        documents: {
-          type: 'dotation',
-          url: storageUrl,
-          name: filename,
-          createdAt: new Date()
+    // Mettre à jour le profil utilisateur (Historique) - Idempotence: vérifier si déjà présent
+    const alreadyExists = user.documents?.some(d => 
+      d.url === storageUrl || (d.type === 'dotation' && d.url.includes(allocationId.toString()))
+    );
+
+    if (!alreadyExists) {
+      await this.connection.model('User').findByIdAndUpdate(user._id, {
+        $push: {
+          documents: {
+            type: 'dotation',
+            url: storageUrl,
+            name: filename,
+            createdAt: new Date()
+          }
         }
-      }
-    });
+      });
+    } else {
+      this.logger.log(`ℹ️ Document déjà présent dans le profil de l'utilisateur ${user.email}. Pas de doublon ajouté.`);
+    }
 
     return savedDoc;
   }
@@ -198,17 +206,25 @@ export class PdfGeneratorService {
       .findByIdAndUpdate(returnId, { returnDocumentId: savedDoc._id })
       .exec();
 
-    // Mettre à jour le profil utilisateur (Historique)
-    await this.connection.model('User').findByIdAndUpdate(user._id, {
-      $push: {
-        documents: {
-          type: 'restitution',
-          url: storageUrl,
-          name: filename,
-          createdAt: new Date()
+    // Mettre à jour le profil utilisateur (Historique) - Idempotence: vérifier si déjà présent
+    const alreadyExists = user.documents?.some(d => 
+      d.url === storageUrl || (d.type === 'restitution' && d.url.includes(returnId.toString()))
+    );
+
+    if (!alreadyExists) {
+      await this.connection.model('User').findByIdAndUpdate(user._id, {
+        $push: {
+          documents: {
+            type: 'restitution',
+            url: storageUrl,
+            name: filename,
+            createdAt: new Date()
+          }
         }
-      }
-    });
+      });
+    } else {
+      this.logger.log(`ℹ️ Document de restitution déjà présent dans le profil de l'utilisateur ${user.email}. Pas de doublon ajouté.`);
+    }
 
     return savedDoc;
   }

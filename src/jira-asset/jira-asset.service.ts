@@ -9,6 +9,8 @@ import { firstValueFrom } from 'rxjs';
 import { map } from 'rxjs/operators';
 
 import { Equipment, EquipmentDocument, EquipmentStatus, EquipmentType } from '../database/schemas/equipment.schema';
+import { User, UserDocument } from '../database/schemas/user.schema';
+import { Allocation, AllocationDocument } from '../database/schemas/allocation.schema';
 import {
   JIRA_EQUIPMENT_TYPE_MAPPING,
   REFERENCE_OBJECT_TYPES,
@@ -78,12 +80,18 @@ export class JiraAssetService {
   // ============================================================
   private userRegistry = new Map<string, JiraAssetObjectResponse>();
   private userRegistryLoadedAt: number = 0;
-  private readonly USER_REGISTRY_TTL_MS = 5 * 60_000; // 5 minutes
+  private readonly USER_REGISTRY_TTL_MS = 10 * 60_000; // 10 minutes (doublé pour plus de stabilité)
+  
+  // ID de l'attribut Email dans le type d'objet "Users" (détecté au chargement du registre)
+  private userEmailAttrId: string | null = null;
+  private userNameAttrId: string | null = null;
 
   constructor(
     private readonly configService: ConfigService,
     private readonly httpService: HttpService,
     @InjectModel(Equipment.name) private equipmentModel: Model<EquipmentDocument>,
+    @InjectModel(User.name) private userModel: Model<UserDocument>,
+    @InjectModel(Allocation.name) private allocationModel: Model<AllocationDocument>,
     @Optional() @Inject(forwardRef(() => AllocationsService)) private readonly allocationsService?: AllocationsService,
     @Optional() private readonly pdfGeneratorService?: PdfGeneratorService,
   ) {
@@ -151,48 +159,76 @@ export class JiraAssetService {
 
       while (true) {
         const response = await firstValueFrom(
-          this.httpService.post<{ values: JiraAssetObjectResponse[]; total?: number }>(
+          this.httpService.post<{ values: JiraAssetObjectResponse[]; total?: number; isLast?: boolean }>(
             searchUrl,
-            // CORRECTION CRITIQUE: ces params doivent etre dans le corps JSON, pas en query params
             { qlQuery: `objectType = "Users"`, maxResults: pageSize, startAt, includeAttributes: true },
             { headers: this.getAuthHeaders() },
           ),
         );
         const page = response.data.values || [];
         allUsers.push(...page);
-        if (page.length < pageSize) break;
+        
+        // CORRECTION: Ne pas se fier uniquement à page.length < pageSize car l'index Jira peut être instable
+        if (page.length === 0 || response.data.isLast === true) break;
         
         startAt += pageSize;
+        // Sécurité pour éviter les boucles infinies si startAt ne progresse pas
+        if (startAt > 5000) break; 
       }
       this.userRegistry.clear();
-      // On sauvegarde aussi une liste dédupliquée
-      const uniqueUsers = new Map<string, JiraAssetObjectResponse>();
       
+      // 1. Détecter dynamiquement les IDs d'attributs Email/Nom pour le type "Users"
+      const schemaId = await this.getObjectSchemaId('Parc Informatique');
+      if (schemaId) {
+        const objectTypes = await this.getAllObjectTypes(schemaId);
+        const userOt = objectTypes.find(ot => ot.name === 'Users');
+        if (userOt) {
+          const attributesDefinition = await this.getObjectTypeAttributesDetails('Users', 'Parc Informatique');
+          const findAttr = (names: string[]) => attributesDefinition.find(a => names.includes(a.name.toLowerCase()));
+          this.userEmailAttrId = findAttr(['email', 'e-mail', 'mail'])?.id || null;
+          this.userNameAttrId = findAttr(['nom complet', 'name', 'nom'])?.id || null;
+          this.logger.debug(`🎯 Attributs détectés pour "Users": Email=${this.userEmailAttrId}, Nom=${this.userNameAttrId}`);
+        }
+      }
+
+      // 2. Indexer les utilisateurs
       for (const u of allUsers) {
-        uniqueUsers.set(u.id, u);
+        // Indexer par ID technique Jira
+        this.userRegistry.set(u.id, u);
+        
+        // Indexer par Label (Nom affiché)
         const rawLabel: string = (u as any).label || '';
         if (rawLabel && rawLabel.trim().length > 1) {
           const k = rawLabel.replace(/\s+/g, '').toLowerCase();
           if (!this.userRegistry.has(k)) this.userRegistry.set(k, u);
         }
+
+        // Indexer par attributs (Email, etc.)
         for (const attr of u.attributes || []) {
           const val = attr.objectAttributeValues?.[0]?.value;
           if (val && typeof val === 'string' && val.trim().length > 1) {
             const k = val.replace(/\s+/g, '').toLowerCase();
+            
+            // Si c'est l'attribut email, on indexe TRÈS proprement
+            if (attr.objectTypeAttributeId === this.userEmailAttrId) {
+              const emailKey = val.trim().toLowerCase();
+              this.userRegistry.set(emailKey, u);
+            }
+            
             if (!this.userRegistry.has(k)) this.userRegistry.set(k, u);
-            val.split(' ').forEach(part => {
-              const pk = part.toLowerCase().trim();
-              if (pk.length > 2 && !this.userRegistry.has(pk)) {
-                this.userRegistry.set(pk, u);
-              }
-            });
+            
+            // Indexer aussi les parties du nom (pour matching partiel)
+            if (attr.objectTypeAttributeId === this.userNameAttrId) {
+              val.split(' ').forEach(part => {
+                const pk = part.toLowerCase().trim();
+                if (pk.length > 2 && !this.userRegistry.has(pk)) {
+                  this.userRegistry.set(pk, u);
+                }
+              });
+            }
           }
         }
       }
-
-      // this.userList = Array.from(uniqueUsers.values());
-      this.userRegistryLoadedAt = Date.now();
-
 
       this.userRegistryLoadedAt = Date.now();
       this.logger.log(`✅ Registre chargé: ${this.userRegistry.size} entrées pour ${allUsers.length} utilisateurs`);
@@ -244,7 +280,7 @@ export class JiraAssetService {
 
         // Chercher chaque partie individuelle (nom seul, prénom seul)
         for (const part of parts) {
-          const partKey = part.replace(/\\s+/g, '').toLowerCase();
+          const partKey = part.replace(/\s+/g, '').toLowerCase(); // FIX: corrected regex from \\s+ to \s+
           if (partKey.length > 2) {
             const candidate = this.userRegistry.get(partKey);
             if (candidate) {
@@ -273,28 +309,38 @@ export class JiraAssetService {
         this.userCache.set(searchKey, { user: fromRegistry, expiresAt: Date.now() + this.USER_CACHE_TTL_MS });
         return fromRegistry;
       }
-      // Pas dans le registre = n'existe pas (le registre est exhaustif)
-      this.logger.debug(`🔍 "${normalizedDisplayName}" absent du registre (${this.userRegistry.size} users chargés)`);
-      return null;
     }
 
-// 3. Fallback : registre pas encore chargé → requête AQL directe
-    this.logger.debug(`🔍 Recherche AQL directe pour: "${normalizedDisplayName}" (registre non chargé)`);
+    // 3. Fallback : Non trouvé dans le registre ou registre non chargé → requête AQL directe
+    // C'est nécessaire car l'index global de Jira Assets peut être incomplet.
+    this.logger.debug(`🔍 Recherche AQL temps réel pour: "${email || normalizedDisplayName}"`);
     const objectTypeName = 'Users';
     try {
       const queryParts: string[] = [];
       if (email) {
-        queryParts.push(`"Email" = "${email}"`);
+        // Utiliser l'ID d'attribut email détecté s'il existe
+        if (this.userEmailAttrId) {
+          queryParts.push(`"${this.userEmailAttrId}" = "${email}"`);
+        } else {
+          queryParts.push(`"Email" = "${email}"`);
+          queryParts.push(`"E-mail" = "${email}"`);
+          queryParts.push(`"mail" = "${email}"`);
+        }
       }
       if (normalizedDisplayName) {
-        queryParts.push(`"Name" = "${normalizedDisplayName}"`);
+        if (this.userNameAttrId) {
+          queryParts.push(`"${this.userNameAttrId}" = "${normalizedDisplayName}"`);
+        } else {
+          queryParts.push(`"Name" = "${normalizedDisplayName}"`);
+          queryParts.push(`"Nom Complet" = "${normalizedDisplayName}"`);
+        }
         const wildcardName = normalizedDisplayName.replace(/\s+/g, '%');
         queryParts.push(`"Name" LIKE "%${wildcardName}%"`);
       }
       if (queryParts.length === 0) return null;
 
       const query = `objectType = "${objectTypeName}" AND (${queryParts.join(' OR ')})`;
-      const results = await this.searchAssetsInJira(objectTypeName, query, 20);
+      const results = await this.searchAssetsInJira(objectTypeName, query, 10);
 
       if (results.length > 0) {
         const bestMatch = results.sort((a, b) => parseInt(a.id) - parseInt(b.id))[0];
@@ -1298,6 +1344,11 @@ export class JiraAssetService {
     try {
       this.logger.log(`🔄 Début de la synchronisation depuis le schéma "${schemaName}"...`);
 
+      // ============================================================
+      // PRÉCHARGER LE REGISTRE UTILISATEURS
+      // ============================================================
+      await this.loadUserRegistry();
+
       // Récupérer tous les assets du schéma via AQL
       const jiraAssets = await this.getAllAssetsFromSchema(schemaName);
 
@@ -1614,13 +1665,10 @@ export class JiraAssetService {
     // Si un utilisateur est affecté dans Jira, essayer de le trouver dans MongoDB
     // Note: Cela nécessite que l'utilisateur existe déjà dans MongoDB (synchronisé depuis Office 365)
     if (assignedUserEmail) {
-      const { Model } = require('mongoose');
-      const UserModel = this.equipmentModel.db.model('User');
-      
       this.logger.debug(`🔍 Recherche de l'utilisateur M365 pour la valeur Jira: "${assignedUserEmail}"`);
       
       // Recherche par email exact ou par displayName (insensible à la casse)
-      const user = await UserModel.findOne({
+      const user = await this.userModel.findOne({
         $or: [
           { email: { $regex: new RegExp(`^${assignedUserEmail}$`, 'i') } },
           { displayName: { $regex: new RegExp(`^${assignedUserEmail}$`, 'i') } }
@@ -1665,13 +1713,8 @@ export class JiraAssetService {
       
       // Gestion de la DOTATION automatique
       if (equipment.currentUserId && equipment.status === EquipmentStatus.AFFECTE) {
-        const AllocationModel = this.equipmentModel.db.model('Allocation');
-        
         // Chercher une allocation active pour CET équipement
-        const activeAlloc = await AllocationModel.findOne({
-          'equipments.equipmentId': equipment._id,
-          status: { $in: ['en_cours', 'en_retard'] },
-        }).exec();
+        const activeAlloc = await this.allocationsService.getActiveAllocationForEquipment(equipment._id.toString());
 
         if (activeAlloc && activeAlloc.userId.toString() === equipment.currentUserId.toString()) {
           this.logger.debug(`✅ Allocation déjà existante pour l'équipement ${equipment.serialNumber} et l'utilisateur ${equipment.currentUserId}`);
@@ -1944,6 +1987,8 @@ export class JiraAssetService {
     ];
 
     // Ajouter le NOM formaté (Marque Modèle - Serial)
+    /* 
+    // Commenté pour éviter d'écraser le label personnalisé (ex: PAR21PC068) dans Jira
     if (fullAttributeMapping.nameAttrId) {
       const formattedName = `${equipment.brand} ${equipment.model} - ${equipment.serialNumber}`;
       attributes.push({
@@ -1952,8 +1997,11 @@ export class JiraAssetService {
       });
       this.logger.debug(`📤 Payload mise à jour Jira (Name): ${formattedName}`);
     }
+    */
 
     // Ajouter l'ID INTERNE si présent
+    /*
+    // Commenté pour éviter d'écraser l'ID Interne personnalisé dans Jira
     if (fullAttributeMapping.internalIdAttrId && equipment.internalId) {
       attributes.push({
         objectTypeAttributeId: fullAttributeMapping.internalIdAttrId,
@@ -1961,6 +2009,7 @@ export class JiraAssetService {
       });
       this.logger.debug(`📤 Payload mise à jour Jira (Internal ID): ${equipment.internalId}`);
     }
+    */
 
     // Log du payload pour debug
     this.logger.debug(`📤 Payload mise à jour Jira (Status): ${JSON.stringify(attributes[0])}`);
