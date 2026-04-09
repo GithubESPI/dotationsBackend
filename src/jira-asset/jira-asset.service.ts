@@ -1927,89 +1927,13 @@ export class JiraAssetService {
         this.logger.error(`❌ Erreur lors de l'auto-détection des attributs: ${error.message}`);
       }
     }
-
-    // Préparer un mapping complet pour le rafraîchissement
-    const fullAttributeMapping: any = { ...attributeMapping };
-    
-    // S'assurer que le nom et l'ID interne sont détectés si nécessaire
-    if (!fullAttributeMapping.nameAttrId || !fullAttributeMapping.internalIdAttrId) {
-      try {
-        const asset = await this.getAssetFromJira(equipment.jiraAssetId);
-        const objectTypeName = asset.objectType.name;
-        const tempDefs = await this.getObjectTypeAttributes(objectTypeName);
-        const detected = this.detectAttributeIds(asset, tempDefs);
-        if (!fullAttributeMapping.nameAttrId) fullAttributeMapping.nameAttrId = detected.nameAttrId;
-        if (!fullAttributeMapping.internalIdAttrId) fullAttributeMapping.internalIdAttrId = detected.internalIdAttrId;
-      } catch (e) {
-        this.logger.warn(`⚠️ Impossible de détecter les attributs Nom/Interne: ${e.message}`);
-      }
-    }
-
-    // Si on a manqué des attributs nécessaires pour le refresh (comme le serial number), on essaie de les détecter maintenant
-    // On profite pour récupérer aussi la map des définitions d'attributs nécessaire pour syncEquipmentFromJira
-    let attributesDefinitionMap: Record<string, string> | undefined;
-
-    if (!fullAttributeMapping.serialNumberAttrId) {
-      try {
-        // Récupération de l'asset si pas déjà fait
-        const asset = await this.getAssetFromJira(equipment.jiraAssetId);
-        const objectTypeName = asset.objectType.name;
-        attributesDefinitionMap = await this.getObjectTypeAttributes(objectTypeName);
-        const detected = this.detectAttributeIds(asset, attributesDefinitionMap);
-
-        // Fusionner les attributs détectés
-        Object.assign(fullAttributeMapping, detected);
-
-        // S'assurer que le status et user de l'input sont conservés s'ils étaient présents
-        if (attributeMapping.statusAttrId) fullAttributeMapping.statusAttrId = attributeMapping.statusAttrId;
-        if (attributeMapping.assignedUserAttrId) fullAttributeMapping.assignedUserAttrId = attributeMapping.assignedUserAttrId;
-
-        this.logger.debug(`🔍 Attributs complémentaires détectés pour refresh: Serial=${fullAttributeMapping.serialNumberAttrId}`);
-      } catch (e) {
-        this.logger.warn(`⚠️ Impossible de détecter les attributs complémentaires: ${e.message}`);
-      }
-    } else {
-      // Même si on a les IDs, il nous faut les définitions pour le refresh complet (pour avoir les noms des champs)
-      try {
-        const asset = await this.getAssetFromJira(equipment.jiraAssetId);
-        const objectTypeName = asset.objectType.name;
-        attributesDefinitionMap = await this.getObjectTypeAttributes(objectTypeName);
-      } catch (e) {
-        this.logger.warn(`⚠️ Impossible de récupérer les définitions d'attributs pour le refresh: ${e.message}`);
-      }
-    }
-
+    // Construire le payload de mise à jour (statut + utilisateur uniquement)
     const attributes = [
       {
         objectTypeAttributeId: attributeMapping.statusAttrId,
         objectAttributeValues: [{ value: this.mapEquipmentStatusToJira(equipment.status) }],
       },
     ];
-
-    // Ajouter le NOM formaté (Marque Modèle - Serial)
-    /* 
-    // Commenté pour éviter d'écraser le label personnalisé (ex: PAR21PC068) dans Jira
-    if (fullAttributeMapping.nameAttrId) {
-      const formattedName = `${equipment.brand} ${equipment.model} - ${equipment.serialNumber}`;
-      attributes.push({
-        objectTypeAttributeId: fullAttributeMapping.nameAttrId,
-        objectAttributeValues: [{ value: formattedName }],
-      });
-      this.logger.debug(`📤 Payload mise à jour Jira (Name): ${formattedName}`);
-    }
-    */
-
-    // Ajouter l'ID INTERNE si présent
-    /*
-    // Commenté pour éviter d'écraser l'ID Interne personnalisé dans Jira
-    if (fullAttributeMapping.internalIdAttrId && equipment.internalId) {
-      attributes.push({
-        objectTypeAttributeId: fullAttributeMapping.internalIdAttrId,
-        objectAttributeValues: [{ value: equipment.internalId }],
-      });
-      this.logger.debug(`📤 Payload mise à jour Jira (Internal ID): ${equipment.internalId}`);
-    }
-    */
 
     // Log du payload pour debug
     this.logger.debug(`📤 Payload mise à jour Jira (Status): ${JSON.stringify(attributes[0])}`);
@@ -2069,37 +1993,11 @@ export class JiraAssetService {
       }
 
       await this.updateAssetInJira(equipment.jiraAssetId, validAttributes as any);
-      equipment.lastSyncedAt = new Date();
-      await equipment.save();
-      this.logger.log(`✅ Statut Jira mis à jour pour l'équipement ${equipment.serialNumber}`);
-      this.logger.debug(`📊 Attributs utilisés: StatusID=${attributeMapping.statusAttrId}, UserID=${attributeMapping.assignedUserAttrId}, NameID=${fullAttributeMapping.nameAttrId}, InternalID=${fullAttributeMapping.internalIdAttrId}`);
-      this.logger.debug(`📤 Payload final: Status="${this.mapEquipmentStatusToJira(equipment.status)}", UserID=${jiraUserIdForLog || 'Libéré'}`);
-      // 3. Rafraîchir les données locales depuis Jira pour s'assurer que tout est synchro
-      // Cela permet de récupérer les libellés exacts (ex: Statut, Utilisateur) tels qu'ils sont dans Jira
-      try {
-        await this.syncEquipmentFromJira(
-          equipment.jiraAssetId,
-          equipment.jiraAssetId /* hack: ID non utilisé ici */,
-          {
-            serialNumberAttrId: fullAttributeMapping.serialNumberAttrId,
-            brandAttrId: fullAttributeMapping.brandAttrId,
-            modelAttrId: fullAttributeMapping.modelAttrId,
-            typeAttrId: fullAttributeMapping.typeAttrId,
-            statusAttrId: fullAttributeMapping.statusAttrId,
-            internalIdAttrId: fullAttributeMapping.internalIdAttrId,
-            assignedUserAttrId: fullAttributeMapping.assignedUserAttrId
-          },
-          attributesDefinitionMap // Pass the definitions!
-        );
-
-        // Ou plus simplement, mettre à jour juste les attributs
-        /*
-        const updatedAsset = await this.getAssetFromJira(equipment.jiraAssetId);
-        // ... logique de mise à jour des attributs ...
-        */
-      } catch (refreshError) {
-        this.logger.warn(`⚠️ Impossible de rafraîchir l'équipement après mise à jour: ${refreshError}`);
-      }
+      // Mettre à jour lastSyncedAt SANS recharger les données depuis Jira
+      // (le rechargement depuis Jira créerait une race condition car Jira n'a pas encore propagé le changement)
+      await this.equipmentModel.findByIdAndUpdate(equipment._id, { lastSyncedAt: new Date() });
+      this.logger.log(`✅ Statut Jira mis à jour pour l'équipement ${equipment.serialNumber}: Status="${this.mapEquipmentStatusToJira(equipment.status)}", UserID=${jiraUserIdForLog || 'Libéré'}`);
+      this.logger.debug(`📊 Attributs utilisés: StatusID=${attributeMapping.statusAttrId}, UserID=${attributeMapping.assignedUserAttrId}`);
 
     } catch (error: any) {
       this.logger.error(`❌ Erreur lors de la mise à jour du statut Jira: ${error.message}`);

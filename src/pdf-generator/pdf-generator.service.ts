@@ -399,10 +399,20 @@ export class PdfGeneratorService {
         // Signature utilisateur
         doc.fontSize(10).font('Helvetica');
         doc.text('Utilisateur:', { continued: false });
-        doc.moveDown(2);
-        doc.text('_________________________', { align: 'left' });
+        if ((allocation as any).signatureData?.signatureImage) {
+          const rawSig = (allocation as any).signatureData.signatureImage.replace(/^data:image\/\w+;base64,/, '');
+          const sigImage = Buffer.from(rawSig, 'base64');
+          doc.image(sigImage, 50, doc.y, { fit: [150, 50] });
+          doc.moveDown(1);
+        } else {
+          doc.moveDown(2);
+          doc.text('_________________________', { align: 'left' });
+        }
         doc.text(`${user.displayName || user.email}`, { align: 'left' });
-        doc.text(`Date: ${new Date().toLocaleDateString('fr-FR')}`, { align: 'left' });
+        doc.text(
+          `Date: ${(allocation as any).signatureData?.timestamp ? new Date((allocation as any).signatureData.timestamp).toLocaleDateString('fr-FR') : new Date().toLocaleDateString('fr-FR')}`,
+          { align: 'left' },
+        );
 
         // Signature IT
         doc.moveDown(1.5);
