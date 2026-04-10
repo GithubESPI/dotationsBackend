@@ -443,10 +443,14 @@ export class JiraAssetService {
 
       const result = await this.createAssetInJira(objectType.id, attributesToCreate);
       this.logger.log(`✅ Utilisateur Asset créé avec succès: ${result.objectKey} (ID: ${result.id})`);
-      // Mettre en cache ET dans le registre le nouvel utilisateur créé
+      // Mettre en cache le nouvel utilisateur créé
       this.userCache.set(lockKey, { user: result, expiresAt: Date.now() + this.USER_CACHE_TTL_MS });
-      // Ajouter au registre existant au lieu de l'invalider (plus efficace)
+      // Invalider le registre global pour forcer un rechargement complet à la prochaine synchro
+      // (évite que des users créés entre-temps soient manqués et recréés en double)
+      this.invalidateUserRegistry();
+      // Ré-ajouter quand même dans le registre local immédiatement (optimisation)
       this.userRegistry.set(lockKey, result);
+      this.userRegistryLoadedAt = Date.now(); // Marquer comme fraîchement rechargé
       return result;
     } catch (error: any) {
       this.logger.error(`❌ Impossible de créer l'utilisateur Asset ${user.email}: ${error.message}`);
@@ -1716,36 +1720,56 @@ export class JiraAssetService {
         // Chercher une allocation active pour CET équipement
         const activeAlloc = await this.allocationsService.getActiveAllocationForEquipment(equipment._id.toString());
 
+        // ============================================================
+        // GARDE ANTI-DOUBLON RENFORCÉE
+        // Si une allocation active existe déjà pour cet équipement ET ce même utilisateur,
+        // on ne crée RIEN (ni allocation, ni PDF) → idempotence totale de la synchro
+        // ============================================================
         if (activeAlloc && activeAlloc.userId.toString() === equipment.currentUserId.toString()) {
-          this.logger.debug(`✅ Allocation déjà existante pour l'équipement ${equipment.serialNumber} et l'utilisateur ${equipment.currentUserId}`);
+          this.logger.debug(`[SYNC SKIP] Équipement ${equipment.serialNumber}: allocation ${activeAlloc._id} déjà active pour l'utilisateur ${equipment.currentUserId}. Aucune action.`);
         } else {
+          // Si une allocation existait pour un AUTRE utilisateur → la clôturer d'abord
           if (activeAlloc) {
-            this.logger.warn(`⚠️ L'équipement ${equipment.serialNumber} était alloué à un autre utilisateur, clôture de l'ancienne allocation.`);
+            this.logger.warn(`⚠️ Équipement ${equipment.serialNumber}: allocation active pour un autre user (${activeAlloc.userId}), clôture avant réaffectation.`);
             await this.allocationsService.closeActiveAllocationForEquipment(equipment._id.toString());
           }
 
-          this.logger.log(`📝 Création automatique de l'allocation (dotation) pour l'équipement ${equipment.serialNumber}`);
-          try {
-            const newAllocation = await this.allocationsService.create({
-              userId: equipment.currentUserId.toString(),
-              equipments: [{ equipmentId: equipment._id.toString() } as any],
-              deliveryDate: new Date().toISOString(),
-            }, 'Jira Sync');
-            this.logger.log(`✅ Allocation créée avec succès (ID: ${newAllocation._id}).`);
+          // ===========================================================
+          // Double-vérification directe en base AVANT de créer
+          // Protège contre les race conditions multi-threads de la synchro
+          // ===========================================================
+          const doubleCheckAlloc = await this.allocationsService.getActiveAllocationForEquipment(equipment._id.toString());
+          if (doubleCheckAlloc && doubleCheckAlloc.userId.toString() === equipment.currentUserId.toString()) {
+            this.logger.debug(`[SYNC SKIP - RACE] Double-check: allocation ${doubleCheckAlloc._id} déjà créée en parallèle pour ${equipment.serialNumber}. Skip.`);
+          } else {
+            this.logger.log(`📝 Création dotation automatique pour équipement ${equipment.serialNumber} → user ${equipment.currentUserId}`);
+            try {
+              const newAllocation = await this.allocationsService.create({
+                userId: equipment.currentUserId.toString(),
+                equipments: [{ equipmentId: equipment._id.toString() } as any],
+                deliveryDate: new Date().toISOString(),
+              }, 'Jira Sync');
+              this.logger.log(`✅ Allocation créée (ID: ${newAllocation._id}) pour équipement ${equipment.serialNumber}.`);
 
-            // Générer le PDF de dotation et mettre à jour les documents de l'utilisateur
-            if (this.pdfGeneratorService && newAllocation._id) {
-              try {
-                await this.pdfGeneratorService.generateAllocationPDF(newAllocation._id.toString());
-                this.logger.log(`✅ Allocation et document PDF créés avec succès.`);
-              } catch (pdfErr: any) {
-                this.logger.error(`❌ Erreur lors de la génération du PDF pour l'allocation ${newAllocation._id}: ${pdfErr.message}`);
+              // Générer le PDF de dotation uniquement si l'allocation est nouvelle
+              if (this.pdfGeneratorService && newAllocation._id) {
+                try {
+                  await this.pdfGeneratorService.generateAllocationPDF(newAllocation._id.toString());
+                  this.logger.log(`✅ PDF de dotation généré pour l'allocation ${newAllocation._id}.`);
+                } catch (pdfErr: any) {
+                  this.logger.error(`❌ Erreur PDF pour l'allocation ${newAllocation._id}: ${pdfErr.message}`);
+                }
+              } else {
+                this.logger.warn(`⚠️ PdfGeneratorService non disponible, le PDF ne sera pas généré.`);
               }
-            } else {
-              this.logger.warn(`⚠️ PdfGeneratorService non disponible, le PDF ne sera pas généré.`);
+            } catch (err: any) {
+              // Si le service retourne l'allocation existante (guard dans create()), ce n'est pas une vraie erreur
+              if (err.message?.includes('déjà')) {
+                this.logger.debug(`[SYNC SKIP - CREATE GUARD] ${err.message}`);
+              } else {
+                this.logger.error(`❌ Erreur création auto-allocation pour ${equipment.serialNumber}: ${err.message}`);
+              }
             }
-          } catch (err: any) {
-            this.logger.error(`❌ Erreur lors de la création automatique de l'allocation: ${err.message}`);
           }
         }
       }
