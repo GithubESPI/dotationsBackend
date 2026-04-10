@@ -53,53 +53,76 @@ export class EquipmentService {
     const { query, type, status, brand, location, currentUserId, onlyIncomplete, page = 1, limit = 20 } = searchDto;
     const skip = (page - 1) * limit;
 
-    // Construire le filtre
-    const filter: any = {};
+    // Construire le filtre de manière modulaire
+    const conditions: any[] = [];
 
-    if (onlyIncomplete === true || onlyIncomplete === 'true' as any) {
-      filter.isMissingSerialNumber = true;
+    if (onlyIncomplete === true || String(onlyIncomplete) === 'true') {
+      conditions.push({ isMissingSerialNumber: true });
     }
 
     if (type) {
-      if (Object.values(EquipmentType).includes(type as EquipmentType)) {
-        filter.type = type;
+      const typeStr = String(type).trim();
+      const typeRegex = new RegExp(`^${typeStr}$`, 'i');
+      
+      const jiraTypeConditions: any[] = [
+        { objectTypeName: typeStr },
+        { objectTypeName: { $regex: typeRegex } },
+        { 'jiraAttributes.Type': typeStr },
+        { 'jiraAttributes.Type': { $regex: typeRegex } },
+        { 'jiraAttributes.Object Type': typeStr },
+        { 'jiraAttributes.Object Type': { $regex: typeRegex } }
+      ];
+
+      const enumValues = Object.values(EquipmentType) as string[];
+      const isInternalType = enumValues.some(v => v.toLowerCase() === typeStr.toLowerCase());
+
+      if (isInternalType) {
+        conditions.push({
+          $or: [
+            { type: typeStr },
+            ...jiraTypeConditions
+          ]
+        });
       } else {
-        // Recherche par type spécifique Jira (Object Type Name)
-        filter.objectTypeName = type;
+        conditions.push({ $or: jiraTypeConditions });
       }
     }
 
     if (status) {
-      filter.status = status;
+      conditions.push({ status });
     }
 
     if (brand) {
-      filter.brand = { $regex: brand, $options: 'i' };
+      conditions.push({ brand: { $regex: brand, $options: 'i' } });
     }
 
     if (location) {
-      filter.location = { $regex: location, $options: 'i' };
+      conditions.push({ location: { $regex: location, $options: 'i' } });
     }
 
     if (currentUserId) {
-      filter.currentUserId = currentUserId;
+      conditions.push({ currentUserId });
     }
 
-    // Recherche textuelle (marque, modèle, N° série, N° interne)
     if (query) {
-      filter.$or = [
-        { brand: { $regex: query, $options: 'i' } },
-        { model: { $regex: query, $options: 'i' } },
-        { serialNumber: { $regex: query, $options: 'i' } },
-        { internalId: { $regex: query, $options: 'i' } },
-        { jiraAssetId: { $regex: query, $options: 'i' } },
-        { 'jiraAttributes.Name': { $regex: query, $options: 'i' } },
-        { 'jiraAttributes.Modèle': { $regex: query, $options: 'i' } },
-        { 'jiraAttributes.Model': { $regex: query, $options: 'i' } },
-      ];
+      const q = String(query).trim();
+      conditions.push({
+        $or: [
+          { brand: { $regex: q, $options: 'i' } },
+          { model: { $regex: q, $options: 'i' } },
+          { serialNumber: { $regex: q, $options: 'i' } },
+          { internalId: { $regex: q, $options: 'i' } },
+          { jiraAssetId: { $regex: q, $options: 'i' } },
+          { 'jiraAttributes.Name': { $regex: q, $options: 'i' } },
+          { objectTypeName: { $regex: q, $options: 'i' } },
+        ],
+      });
     }
+
+    const filter = conditions.length > 0 ? { $and: conditions } : {};
 
     // Exécuter la requête
+    this.logger.debug(`Filtre Final MongoDB : ${JSON.stringify(filter)}`);
     const [equipments, total] = await Promise.all([
       this.equipmentModel
         .find(filter)
