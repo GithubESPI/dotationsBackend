@@ -75,9 +75,12 @@ export class EmployeesService {
       employeeData.managerEmail = graphUser.manager.mail || graphUser.manager.userPrincipalName;
     }
 
-    // Chercher l'employé existant par office365Id (identifiant unique)
+    // Chercher l'employé existant par office365Id OU par email
     const existingEmployee = await this.userModel.findOne({
-      office365Id: employeeData.office365Id,
+      $or: [
+        { office365Id: employeeData.office365Id },
+        { email: employeeData.email }
+      ]
     });
 
     // NOTE: La récupération de la photo de profil a été déplacée dans une méthode séparée

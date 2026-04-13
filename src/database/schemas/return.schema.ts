@@ -121,8 +121,6 @@ export class Return {
 export const ReturnSchema = SchemaFactory.createForClass(Return);
 
 // Index pour améliorer les performances
-ReturnSchema.index({ userId: 1 });
-ReturnSchema.index({ allocationId: 1 });
 ReturnSchema.index({ returnDate: 1 });
 ReturnSchema.index({ 'rhValidation.soldeToutCompte': 1 });
 ReturnSchema.index({ createdAt: -1 });

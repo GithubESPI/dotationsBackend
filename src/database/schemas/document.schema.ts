@@ -90,9 +90,6 @@ export class DocumentModel {
 export const DocumentSchema = SchemaFactory.createForClass(DocumentModel);
 
 // Index pour améliorer les performances
-DocumentSchema.index({ allocationId: 1 });
-DocumentSchema.index({ returnId: 1 });
-DocumentSchema.index({ status: 1 });
 DocumentSchema.index({ documentType: 1 });
 DocumentSchema.index({ createdAt: -1 });
 

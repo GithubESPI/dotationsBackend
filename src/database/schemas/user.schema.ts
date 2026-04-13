@@ -164,7 +164,5 @@ export class User {
 export const UserSchema = SchemaFactory.createForClass(User);
 
 // Index pour améliorer les performances de recherche
-UserSchema.index({ email: 1 });
-UserSchema.index({ office365Id: 1 });
 UserSchema.index({ isActive: 1 });
 

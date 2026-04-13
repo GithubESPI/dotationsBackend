@@ -85,8 +85,6 @@ export class Equipment {
 export const EquipmentSchema = SchemaFactory.createForClass(Equipment);
 
 // Index pour améliorer les performances
-EquipmentSchema.index({ serialNumber: 1 });
-EquipmentSchema.index({ jiraAssetId: 1 });
 EquipmentSchema.index({ status: 1 });
 EquipmentSchema.index({ currentUserId: 1 });
 EquipmentSchema.index({ type: 1 });

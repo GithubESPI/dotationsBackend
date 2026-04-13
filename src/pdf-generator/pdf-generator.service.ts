@@ -56,7 +56,7 @@ export class PdfGeneratorService {
     const pdfBuffer = await this.createAllocationPDFBuffer(allocation, user);
 
     // Upload vers Azure
-    const filename = `dotation_${allocation._id}_${Date.now()}.pdf`;
+    const filename = `dotation_${allocation._id}.pdf`;
     let storageUrl = '';
     let storageType = 'gridfs';
     let fileId: Types.ObjectId = new Types.ObjectId(); // Dummy ID for Azure, or real for GridFS
@@ -161,7 +161,7 @@ export class PdfGeneratorService {
     const pdfBuffer = await this.createReturnPDFBuffer(returnDoc, user);
 
     // Upload vers Azure
-    const filename = `restitution_${returnDoc._id}_${Date.now()}.pdf`;
+    const filename = `restitution_${returnDoc._id}.pdf`;
     let storageUrl = '';
     let storageType = 'gridfs';
     let fileId: Types.ObjectId = new Types.ObjectId();

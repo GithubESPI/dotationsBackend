@@ -102,8 +102,6 @@ export class Allocation {
 export const AllocationSchema = SchemaFactory.createForClass(Allocation);
 
 // Index pour améliorer les performances
-AllocationSchema.index({ userId: 1 });
-AllocationSchema.index({ status: 1 });
 AllocationSchema.index({ deliveryDate: 1 });
 AllocationSchema.index({ createdAt: -1 });
 
