@@ -90,6 +90,8 @@ async function bootstrap() {
               'openid': 'OpenID Connect',
               'profile': 'Profil utilisateur',
               'email': 'Email',
+              'User.Read': 'Lire le profil utilisateur',
+              'User.Read.All': 'Lire tous les utilisateurs',
             },
           },
         },

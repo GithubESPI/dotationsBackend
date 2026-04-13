@@ -62,7 +62,7 @@ export class AzureADStrategy extends PassportStrategy(OIDCStrategy as any, 'azur
       validateIssuer: true, // Valide que le token provient du bon tenant
       passReqToCallback: false,
       // Scopes pour Microsoft Graph API
-      scope: ['openid', 'profile', 'email', 'User.Read', 'offline_access'],
+      scope: ['openid', 'profile', 'email', 'User.Read', 'User.Read.All', 'offline_access'],
     };
 
     const verify = (

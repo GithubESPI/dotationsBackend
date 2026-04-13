@@ -72,7 +72,7 @@ export class AuthController {
         ? envRedirect.split(',')[0].replace(/^["']|["']$/g, '').trim()
         : envRedirect ? envRedirect.replace(/^["']|["']$/g, '').trim() : 'http://localhost:3000/auth/azure-ad/callback';
     const redirectUri = encodeURIComponent(resolvedRedirectUri);
-    const scopes = encodeURIComponent('openid profile email User.Read offline_access');
+    const scopes = encodeURIComponent('openid profile email User.Read User.Read.All offline_access');
     const state = Math.random().toString(36).substring(7); // Générer un state aléatoire
     
     // Sauvegarder le state dans la session pour la validation
