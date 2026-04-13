@@ -1,3 +1,4 @@
+import axios from 'axios';
 import {
   Controller,
   Get,
@@ -175,82 +176,103 @@ export class AuthController {
 
   @Get('azure-ad/callback')
   @Public()
-  @UseGuards(AzureADGuard)
+  // @UseGuards(AzureADGuard) - Désactivé pour gérer l'échange de code manuellement et éviter les erreurs de session (stateless)
   @ApiOperation({ summary: 'Callback Azure AD après authentification avec Microsoft Graph' })
   @ApiResponse({
     status: 302,
     description: 'Redirection vers le frontend avec le token',
   })
   async azureAdCallback(@Request() req, @Res() res) {
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3001';
+    
     try {
-      // Logger les détails de la requête pour le débogage
-      console.log('📥 Callback Azure AD reçu:', {
-        url: req.url,
-        query: req.query,
-        hasUser: !!req.user,
-        sessionId: req.session?.id,
-        cookies: Object.keys(req.cookies || {}),
-      });
+      const code = req.query.code;
+      const error = req.query.error;
+      const errorDescription = req.query.error_description;
 
-      // Vérifier que l'utilisateur est bien authentifié
-      if (!req.user) {
-        console.error('❌ Erreur: req.user est undefined dans le callback');
-        console.error('   Détails de la requête:', {
-          query: req.query,
-          params: req.params,
-          session: req.session,
-        });
-
-        // Vérifier la configuration
-        const envRedirect2 = process.env.AZURE_AD_REDIRECT_URI;
-        const redirectUri =
-          envRedirect2 && envRedirect2.includes(',')
-            ? envRedirect2.split(',')[0].replace(/^["']|["']$/g, '').trim()
-            : envRedirect2 ? envRedirect2.replace(/^["']|["']$/g, '').trim() : 'http://localhost:3000/auth/azure-ad/callback';
-        const clientSecret = process.env.AZURE_AD_CLIENT_SECRET;
-        console.error('   Configuration vérifiée:');
-        console.error(`   - Redirect URI: ${redirectUri}`);
-        console.error(`   - Client Secret: ${clientSecret ? 'défini (' + clientSecret.substring(0, 8) + '...)' : 'MANQUANT'}`);
-        console.error(`   - URL de callback reçue: ${req.protocol}://${req.get('host')}${req.path}`);
-
-        // Vérifier si l'URL de redirection correspond
-        const expectedUrl = redirectUri.toLowerCase();
-        const actualUrl = `${req.protocol}://${req.get('host')}${req.path}`.toLowerCase();
-        if (expectedUrl !== actualUrl) {
-          console.error(`   ⚠️  URL MISMATCH: L'URL de redirection ne correspond pas!`);
-          console.error(`      Attendu: ${expectedUrl}`);
-          console.error(`      Reçu: ${actualUrl}`);
-        }
-
-        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3001';
-        const errorMessage = encodeURIComponent(
-          'Échec de l\'authentification. Vérifiez que le CLIENT_SECRET est correct et que l\'URL de redirection correspond exactement à celle configurée dans Azure Portal.'
-        );
-        const errorUrl = `${frontendUrl}/callback?error=${errorMessage}`;
+      if (error) {
+        console.error(`❌ Erreur retournée par Azure AD: ${error} - ${errorDescription}`);
+        const errorUrl = `${frontendUrl}/callback?error=${encodeURIComponent(errorDescription || error)}`;
         return res.redirect(errorUrl);
       }
 
-      console.log('✅ Callback reçu, utilisateur authentifié:', req.user.email || req.user.id);
+      if (!code) {
+        console.error('❌ Erreur: Aucun code d\'autorisation reçu dans le callback');
+        const errorUrl = `${frontendUrl}/callback?error=${encodeURIComponent('Aucun code d\'autorisation reçu')}`;
+        return res.redirect(errorUrl);
+      }
 
-      // Passer l'access token Azure AD pour récupérer les données depuis Graph
-      const azureAccessToken = req.user?.accessToken || req.user?.azureAccessToken;
+      // Configuration Azure AD
+      const tenantIdRaw = process.env.AZURE_AD_TENANT_ID;
+      const tenantId = tenantIdRaw ? tenantIdRaw.replace(/^["']|["']$/g, '').trim() : 'common';
+      const clientIDRaw = process.env.AZURE_AD_CLIENT_ID;
+      const clientID = clientIDRaw ? clientIDRaw.replace(/^["']|["']$/g, '').trim() : undefined;
+      const clientSecretRaw = process.env.AZURE_AD_CLIENT_SECRET;
+      const clientSecret = clientSecretRaw ? clientSecretRaw.replace(/^["']|["']$/g, '').trim() : undefined;
+      
+      const envRedirect = process.env.AZURE_AD_REDIRECT_URI;
+      const redirectUri = envRedirect && envRedirect.includes(',')
+        ? envRedirect.split(',')[0].replace(/^["']|["']$/g, '').trim()
+        : envRedirect ? envRedirect.replace(/^["']|["']$/g, '').trim() : 'http://localhost:3000/auth/azure-ad/callback';
 
+      if (!clientID || !clientSecret) {
+        throw new Error('CLIENT_ID ou CLIENT_SECRET manquant dans la configuration');
+      }
+
+      console.log('🔄 Échange du code d\'autorisation contre un access token...');
+      
+      const tokenUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`;
+      const params = new URLSearchParams();
+      params.append('client_id', clientID);
+      params.append('client_secret', clientSecret);
+      params.append('code', code as string);
+      params.append('redirect_uri', redirectUri);
+      params.append('grant_type', 'authorization_code');
+      // Les scopes doivent correspondre exactement à ceux demandés
+      params.append('scope', 'openid profile email User.Read offline_access');
+
+      let tokenResponse;
+      try {
+        tokenResponse = await axios.post(tokenUrl, params, {
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        });
+      } catch (tokenError: any) {
+        console.error('❌ Erreur lors de l\'échange du code:', tokenError.response?.data || tokenError.message);
+        const errorMessage = encodeURIComponent(
+          'Échec de l\'authentification. Vérifiez que le CLIENT_SECRET est correct et que l\'URL de redirection correspond exactement à celle configurée dans Azure Portal.'
+        );
+        return res.redirect(`${frontendUrl}/callback?error=${errorMessage}`);
+      }
+
+      const azureAccessToken = tokenResponse.data.access_token;
+      
       if (!azureAccessToken) {
-        console.warn('⚠️  Aucun access token Azure AD trouvé dans req.user');
+        throw new Error('Aucun access token reçu d\'Azure AD');
       }
 
-      const result = await this.authService.login(req.user, azureAccessToken);
+      console.log('✅ Access token Azure AD reçu avec succès');
 
-      // Stocker le token Azure AD dans la session pour utilisation ultérieure
-      if (azureAccessToken && req.session) {
-        req.session.azureAccessToken = azureAccessToken;
-        req.session.userId = req.user.id;
-      }
+      // Récupérer le profil utilisateur depuis Microsoft Graph API
+      const graphProfile = await this.graphService.getUserProfile(azureAccessToken);
+      
+      // Construire un objet utilisateur pour le service auth
+      const userToLogin = {
+        id: graphProfile.id,
+        email: graphProfile.userPrincipalName || graphProfile.mail || '',
+        name: graphProfile.displayName || graphProfile.givenName || 'Utilisateur Azure',
+        sub: graphProfile.id,
+        roles: [], // Sera enrichi par le authService
+        profile: {
+          _json: graphProfile
+        }
+      };
+
+      console.log(`✅ Profil récupéré pour: ${userToLogin.email}`);
+
+      // Connexion via le auth service (récupération des groupes, attribution du rôle, génération JWT)
+      const result = await this.authService.login(userToLogin, azureAccessToken);
 
       // Rediriger vers le frontend via le fragment URL (#token=)
-      // Le fragment n'est JAMAIS envoyé au serveur → évite le 431 sur Azure App Service
-      // Le callback frontend lit déjà le token depuis window.location.hash (lignes 38-49)
-      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3001';
       const redirectUrl = `${frontendUrl}/callback#token=${encodeURIComponent(result.access_token)}`;
 
       console.log(`🔄 Redirection vers: ${frontendUrl}/callback`);
@@ -260,7 +282,6 @@ export class AuthController {
         message: error.message,
         stack: error.stack,
         name: error.name,
-        query: req.query,
       });
 
       const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3001';
