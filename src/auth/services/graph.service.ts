@@ -193,12 +193,17 @@ export class GraphService {
    * @returns Token d'accès application
    */
   async getApplicationAccessToken(): Promise<string> {
-    const tenantId = this.configService.get<string>('AZURE_AD_TENANT_ID');
-    const clientId = this.configService.get<string>('AZURE_AD_CLIENT_ID');
-    const clientSecret = this.configService.get<string>('AZURE_AD_CLIENT_SECRET');
+    const tenantIdRaw = this.configService.get<string>('AZURE_AD_TENANT_ID');
+    const tenantId = tenantIdRaw ? tenantIdRaw.replace(/^["']|["']$/g, '').trim() : undefined;
+    
+    const clientIdRaw = this.configService.get<string>('AZURE_AD_CLIENT_ID');
+    const clientId = clientIdRaw ? clientIdRaw.replace(/^["']|["']$/g, '').trim() : undefined;
+    
+    const clientSecretRaw = this.configService.get<string>('AZURE_AD_CLIENT_SECRET');
+    const clientSecret = clientSecretRaw ? clientSecretRaw.replace(/^["']|["']$/g, '').trim() : undefined;
 
     if (!tenantId || !clientId || !clientSecret) {
-      throw new Error('Les identifiants Azure AD (Tenant, Client ID, Client Secret) ne sont pas configurés.');
+      throw new Error('Les identifiants Azure AD (Tenant, Client ID, Client Secret) ne sont pas configurés correctement.');
     }
 
     const tokenUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`;
