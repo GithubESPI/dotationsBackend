@@ -20,12 +20,12 @@ async function bootstrap() {
       saveUninitialized: true,   // Créer la session immédiatement (crucial pour OAuth)
       proxy: true,               // Faire confiance au proxy nginx pour les cookies Secure
       cookie: {
-        // nginx gère le HTTPS en amont — mettre secure:true empêche le cookie
-        // d'être envoyé car Node.js voit HTTP (nginx ne forward pas X-Forwarded-Proto)
-        secure: false,
+        // En production avec trust proxy:true, secure:true est requis pour que 
+        // les navigateurs acceptent le cookie provenant d'une redirection Azure
+        secure: process.env.NODE_ENV === 'production',
         httpOnly: true,
         maxAge: 24 * 60 * 60 * 1000, // 24 heures
-        sameSite: 'lax',
+        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax', // 'none' requis pour cross-site avec secure:true
       },
     }),
   );

@@ -68,10 +68,11 @@ export class AuthController {
     const clientIDRaw = process.env.AZURE_AD_CLIENT_ID;
     const clientID = clientIDRaw ? clientIDRaw.replace(/^["']|["']$/g, '').trim() : undefined;
     const envRedirect = process.env.AZURE_AD_REDIRECT_URI;
-    const resolvedRedirectUri =
+    const resolvedRedirectUri = (
       envRedirect && envRedirect.includes(',')
         ? envRedirect.split(',')[0].replace(/^["']|["']$/g, '').trim()
-        : envRedirect ? envRedirect.replace(/^["']|["']$/g, '').trim() : 'http://localhost:3000/auth/azure-ad/callback';
+        : envRedirect ? envRedirect.replace(/^["']|["']$/g, '').trim() : 'http://localhost:3000/auth/azure-ad/callback'
+    ).replace('dodation', 'dotation');
     const redirectUri = encodeURIComponent(resolvedRedirectUri);
     const scopes = encodeURIComponent('openid profile email User.Read offline_access');
     const state = Math.random().toString(36).substring(7); // Générer un state aléatoire
