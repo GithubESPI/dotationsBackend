@@ -76,6 +76,12 @@ export class AuthController {
     const scopes = encodeURIComponent('openid profile email User.Read offline_access');
     const state = Math.random().toString(36).substring(7); // Générer un state aléatoire
 
+    console.log('🚀 [AUTH-DEBUG-STEP-1] Initialisation de l\'authentification Azure AD');
+    console.log(`   - Version du code: 2026-04-13-STEP-LOGS`);
+    console.log(`   - Client ID: ${clientID?.substring(0, 8)}...`);
+    console.log(`   - Redirect URI (résolu): ${resolvedRedirectUri}`);
+    console.log(`   - Tenant ID: ${tenantId}`);
+
     // Sauvegarder le state dans la session pour la validation par passport-azure-ad
     if (req.session) {
       req.session.oauthState = state;
@@ -84,18 +90,15 @@ export class AuthController {
       // on doit créer cette structure manuellement pour éviter l'erreur "State mismatch" au retour.
       req.session['azuread-openidconnect'] = { state: state };
       req.session['azure-ad'] = { state: state }; // Au cas où la clé serait renommée
+      console.log('   - State sauvegardé en session');
+    } else {
+      console.warn('   - ⚠️ Session absente lors de l\'initialisation');
     }
 
-    const azureAuthUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/authorize?` +
-      `client_id=${clientID}&` +
-      `response_type=code&` +
-      `redirect_uri=${redirectUri}&` +
-      `response_mode=query&` +
-      `scope=${scopes}&` +
-      `state=${state}`;
-
-    console.log(`🔄 Redirection vers Azure AD: ${azureAuthUrl.substring(0, 100)}...`);
-    return res.redirect(azureAuthUrl);
+    const authUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/authorize?client_id=${clientID}&response_type=code&redirect_uri=${redirectUri}&response_mode=query&scope=${scopes}&state=${state}`;
+    
+    console.log('   - Redirection vers MicrosoftAuthorize: Success');
+    return res.redirect(authUrl);
   }
 
   @Post('test')
@@ -211,15 +214,23 @@ export class AuthController {
       const clientSecret = clientSecretRaw ? clientSecretRaw.replace(/^["']|["']$/g, '').trim() : undefined;
 
       const envRedirect = process.env.AZURE_AD_REDIRECT_URI;
-      const redirectUri = envRedirect && envRedirect.includes(',')
-        ? envRedirect.split(',')[0].replace(/^["']|["']$/g, '').trim()
-        : envRedirect ? envRedirect.replace(/^["']|["']$/g, '').trim() : 'http://localhost:3000/auth/azure-ad/callback';
+      const redirectUri = (
+        envRedirect && envRedirect.includes(',')
+          ? envRedirect.split(',')[0].replace(/^["']|["']$/g, '').trim()
+          : envRedirect ? envRedirect.replace(/^["']|["']$/g, '').trim() : 'http://localhost:3000/auth/azure-ad/callback'
+      ); // NOTE: Restoration du domaine brut sans .replace() pour correspondre à .env
+
+      console.log('🚀 [AUTH-DEBUG-STEP-2] Callback reçu d\'Azure AD');
+      console.log(`   - Code reçu: ${code ? 'OUI (masqué)' : 'NON'}`);
+      console.log(`   - Redirect URI utilisé pour l'échange: ${redirectUri}`);
+      console.log(`   - Client ID: ${clientID?.substring(0, 8)}...`);
 
       if (!clientID || !clientSecret) {
+        console.error('❌ [AUTH-DEBUG] CLIENT_ID ou CLIENT_SECRET manquant');
         throw new Error('CLIENT_ID ou CLIENT_SECRET manquant dans la configuration');
       }
 
-      console.log('🔄 Échange du code d\'autorisation contre un access token...');
+      console.log('🔄 [AUTH-DEBUG-STEP-3] Échange du code d\'autorisation contre un access token...');
 
       const tokenUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`;
       const params = new URLSearchParams();
