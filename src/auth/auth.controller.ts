@@ -40,7 +40,7 @@ export class AuthController {
 
   @Get('azure-ad')
   @Public()
-  @UseGuards(AzureADGuard)
+  // @UseGuards(AzureADGuard) - Désactivé pour rendre l'authentification complètement stateless
   @ApiOperation({
     summary: 'Initier la connexion Azure AD',
     description: '⚠️ Cet endpoint déclenche une redirection OAuth2 vers Azure AD et ne peut pas être testé directement dans Swagger. Utilisez plutôt /auth/test avec un token Azure AD, ou ouvrez cet endpoint dans votre navigateur.',
