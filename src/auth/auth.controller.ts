@@ -72,12 +72,17 @@ export class AuthController {
         ? envRedirect.split(',')[0].replace(/^["']|["']$/g, '').trim()
         : envRedirect ? envRedirect.replace(/^["']|["']$/g, '').trim() : 'http://localhost:3000/auth/azure-ad/callback';
     const redirectUri = encodeURIComponent(resolvedRedirectUri);
-    const scopes = encodeURIComponent('openid profile email User.Read User.Read.All offline_access');
+    const scopes = encodeURIComponent('openid profile email User.Read offline_access');
     const state = Math.random().toString(36).substring(7); // Générer un state aléatoire
     
-    // Sauvegarder le state dans la session pour la validation
+    // Sauvegarder le state dans la session pour la validation par passport-azure-ad
     if (req.session) {
       req.session.oauthState = state;
+      // passport-azure-ad s'attend à trouver le state généré dans sa propre clé de session
+      // Puisqu'on fait une redirection manuelle et qu'on court-circuite son initiation,
+      // on doit créer cette structure manuellement pour éviter l'erreur "State mismatch" au retour.
+      req.session['azuread-openidconnect'] = { state: state };
+      req.session['azure-ad'] = { state: state }; // Au cas où la clé serait renommée
     }
     
     const azureAuthUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/authorize?` +

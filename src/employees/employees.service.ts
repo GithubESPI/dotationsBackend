@@ -100,9 +100,20 @@ export class EmployeesService {
    * Référence API: https://graph.microsoft.com/v1.0/users
    * Documentation: https://learn.microsoft.com/fr-fr/graph/api/resources/users
    */
-  async syncFromOffice365(accessToken: string): Promise<{ synced: number; errors: number; skipped: number }> {
+  async syncFromOffice365(providedToken?: string): Promise<{ synced: number; errors: number; skipped: number }> {
     this.logger.log('🔄 Début de la synchronisation Office 365...');
     this.logger.log('   Endpoint: https://graph.microsoft.com/v1.0/users');
+    
+    let accessToken = providedToken;
+    try {
+      this.logger.log('   Obtention du token d\'application (Client Credentials)...');
+      accessToken = await this.graphService.getApplicationAccessToken();
+    } catch (e) {
+      if (!accessToken) {
+        throw new BadRequestException('Impossible d\'obtenir un token d\'accès valide pour Microsoft Graph');
+      }
+      this.logger.warn('   Impossible d\'obtenir le token d\'application, tentative avec le token utilisateur (si fourni)...');
+    }
 
     let synced = 0;
     let errors = 0;
@@ -395,11 +406,20 @@ export class EmployeesService {
    * Elle traite les employés par lots pour éviter de surcharger l'API
    */
   async syncProfilePhotos(
-    accessToken: string,
+    providedToken?: string,
     batchSize: number = 50,
     maxUsers: number = 100
   ): Promise<{ updated: number; errors: number; skipped: number }> {
     this.logger.log('📸 Début de la synchronisation des photos de profil...');
+
+    let accessToken = providedToken;
+    try {
+      accessToken = await this.graphService.getApplicationAccessToken();
+    } catch (e) {
+      if (!accessToken) {
+        throw new BadRequestException('Impossible d\'obtenir un token d\'accès valide pour Microsoft Graph');
+      }
+    }
 
     let updated = 0;
     let errors = 0;
