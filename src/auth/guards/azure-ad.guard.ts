@@ -82,6 +82,8 @@ export class AzureADGuard extends AuthGuard('azure-ad') {
       }
       
       this.logger.warn('⚠️  Aucun utilisateur trouvé dans AzureADGuard:', errorDetails);
+      const exactError = info?.message || info || 'Authentification refusée par Azure AD';
+      throw new UnauthorizedException(typeof exactError === 'string' ? exactError : JSON.stringify(exactError));
     } else {
       this.logger.log('✅ Utilisateur authentifié dans AzureADGuard:', {
         userId: user.id,
