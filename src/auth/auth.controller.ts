@@ -238,9 +238,11 @@ export class AuthController {
         });
       } catch (tokenError: any) {
         console.error('❌ Erreur lors de l\'échange du code:', tokenError.response?.data || tokenError.message);
-        const errorMessage = encodeURIComponent(
-          'Échec de l\'authentification. Vérifiez que le CLIENT_SECRET est correct et que l\'URL de redirection correspond exactement à celle configurée dans Azure Portal.'
-        );
+        
+        const azureErrorData = tokenError.response?.data;
+        const errorDetails = azureErrorData?.error_description || azureErrorData?.error || tokenError.message;
+        
+        const errorMessage = encodeURIComponent(`Erreur Azure AD lors de l'échange: ${errorDetails}`);
         return res.redirect(`${frontendUrl}/callback?error=${errorMessage}`);
       }
 
