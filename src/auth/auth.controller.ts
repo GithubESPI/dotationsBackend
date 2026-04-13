@@ -185,7 +185,7 @@ export class AuthController {
   })
   async azureAdCallback(@Request() req, @Res() res) {
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3001';
-    
+
     try {
       const code = req.query.code;
       const error = req.query.error;
@@ -210,18 +210,20 @@ export class AuthController {
       const clientID = clientIDRaw ? clientIDRaw.replace(/^["']|["']$/g, '').trim() : undefined;
       const clientSecretRaw = process.env.AZURE_AD_CLIENT_SECRET;
       const clientSecret = clientSecretRaw ? clientSecretRaw.replace(/^["']|["']$/g, '').trim() : undefined;
-      
+
       const envRedirect = process.env.AZURE_AD_REDIRECT_URI;
-      const redirectUri = envRedirect && envRedirect.includes(',')
-        ? envRedirect.split(',')[0].replace(/^["']|["']$/g, '').trim()
-        : envRedirect ? envRedirect.replace(/^["']|["']$/g, '').trim() : 'http://localhost:3000/auth/azure-ad/callback';
+      const redirectUri = (
+        envRedirect && envRedirect.includes(',')
+          ? envRedirect.split(',')[0].replace(/^["']|["']$/g, '').trim()
+          : envRedirect ? envRedirect.replace(/^["']|["']$/g, '').trim() : 'http://localhost:3000/auth/azure-ad/callback'
+      ).replace('dodation', 'dotation');
 
       if (!clientID || !clientSecret) {
         throw new Error('CLIENT_ID ou CLIENT_SECRET manquant dans la configuration');
       }
 
       console.log('🔄 Échange du code d\'autorisation contre un access token...');
-      
+
       const tokenUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`;
       const params = new URLSearchParams();
       params.append('client_id', clientID);
@@ -239,16 +241,16 @@ export class AuthController {
         });
       } catch (tokenError: any) {
         console.error('❌ Erreur lors de l\'échange du code:', tokenError.response?.data || tokenError.message);
-        
+
         const azureErrorData = tokenError.response?.data;
         const errorDetails = azureErrorData?.error_description || azureErrorData?.error || tokenError.message;
-        
+
         const errorMessage = encodeURIComponent(`Erreur Azure AD lors de l'échange: ${errorDetails}`);
         return res.redirect(`${frontendUrl}/callback?error=${errorMessage}`);
       }
 
       const azureAccessToken = tokenResponse.data.access_token;
-      
+
       if (!azureAccessToken) {
         throw new Error('Aucun access token reçu d\'Azure AD');
       }
@@ -257,7 +259,7 @@ export class AuthController {
 
       // Récupérer le profil utilisateur depuis Microsoft Graph API
       const graphProfile = await this.graphService.getUserProfile(azureAccessToken);
-      
+
       // Construire un objet utilisateur pour le service auth
       const userToLogin = {
         id: graphProfile.id,
