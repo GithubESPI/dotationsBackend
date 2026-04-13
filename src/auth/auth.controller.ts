@@ -35,12 +35,12 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly graphService: GraphService,
-  ) {}
+  ) { }
 
   @Get('azure-ad')
   @Public()
   @UseGuards(AzureADGuard)
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Initier la connexion Azure AD',
     description: '⚠️ Cet endpoint déclenche une redirection OAuth2 vers Azure AD et ne peut pas être testé directement dans Swagger. Utilisez plutôt /auth/test avec un token Azure AD, ou ouvrez cet endpoint dans votre navigateur.',
   })
@@ -50,18 +50,18 @@ export class AuthController {
     console.log('📤 Requête reçue sur /auth/azure-ad');
     console.log('   Session:', req.session?.id ? 'présente' : 'absente');
     console.log('   User:', req.user ? 'présent' : 'absent');
-    
+
     // Si l'utilisateur est déjà authentifié, rediriger vers le frontend
     if (req.user) {
       console.log('✅ Utilisateur déjà authentifié, redirection vers le frontend');
       const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3001';
       return res.redirect(`${frontendUrl}/`);
     }
-    
+
     // Si on arrive ici sans utilisateur, Passport devrait avoir redirigé
     // Mais si ce n'est pas le cas, construire manuellement l'URL de redirection Azure AD
     console.log('🔄 Construction de l\'URL de redirection Azure AD...');
-    
+
     const tenantIdRaw = process.env.AZURE_AD_TENANT_ID;
     const tenantId = tenantIdRaw ? tenantIdRaw.replace(/^["']|["']$/g, '').trim() : 'common';
     const clientIDRaw = process.env.AZURE_AD_CLIENT_ID;
@@ -72,9 +72,9 @@ export class AuthController {
         ? envRedirect.split(',')[0].replace(/^["']|["']$/g, '').trim()
         : envRedirect ? envRedirect.replace(/^["']|["']$/g, '').trim() : 'http://localhost:3000/auth/azure-ad/callback';
     const redirectUri = encodeURIComponent(resolvedRedirectUri);
-    const scopes = encodeURIComponent('openid profile email User.Read offline_access');
+    const scopes = encodeURIComponent('openid profile email User.Read offline_access User.Read.All');
     const state = Math.random().toString(36).substring(7); // Générer un state aléatoire
-    
+
     // Sauvegarder le state dans la session pour la validation par passport-azure-ad
     if (req.session) {
       req.session.oauthState = state;
@@ -84,7 +84,7 @@ export class AuthController {
       req.session['azuread-openidconnect'] = { state: state };
       req.session['azure-ad'] = { state: state }; // Au cas où la clé serait renommée
     }
-    
+
     const azureAuthUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/authorize?` +
       `client_id=${clientID}&` +
       `response_type=code&` +
@@ -92,14 +92,14 @@ export class AuthController {
       `response_mode=query&` +
       `scope=${scopes}&` +
       `state=${state}`;
-    
+
     console.log(`🔄 Redirection vers Azure AD: ${azureAuthUrl.substring(0, 100)}...`);
     return res.redirect(azureAuthUrl);
   }
 
   @Post('test')
   @Public()
-  @ApiOperation({ 
+  @ApiOperation({
     summary: '🧪 TESTER: Authentification avec un token Azure AD (pour Swagger)',
     description: 'Utilisez cet endpoint pour tester l\'authentification avec un token Azure AD obtenu depuis Microsoft Graph Explorer. Entrez votre token dans le champ ci-dessous.',
   })
@@ -107,8 +107,8 @@ export class AuthController {
     schema: {
       type: 'object',
       properties: {
-        azureToken: { 
-          type: 'string', 
+        azureToken: {
+          type: 'string',
           description: 'Token Azure AD obtenu depuis Graph Explorer (https://developer.microsoft.com/en-us/graph/graph-explorer)',
           example: 'eyJ0eXAiOiJKV1QiLCJub...',
         },
@@ -142,7 +142,7 @@ export class AuthController {
     try {
       // Récupérer le profil depuis Graph API avec le token fourni
       const graphProfile = await this.graphService.getUserProfile(body.azureToken);
-      
+
       // Récupérer aussi la photo et les groupes
       const [photo, groups] = await Promise.all([
         this.graphService.getUserPhoto(body.azureToken).catch(() => null),
@@ -200,7 +200,7 @@ export class AuthController {
           params: req.params,
           session: req.session,
         });
-        
+
         // Vérifier la configuration
         const envRedirect2 = process.env.AZURE_AD_REDIRECT_URI;
         const redirectUri =
@@ -212,7 +212,7 @@ export class AuthController {
         console.error(`   - Redirect URI: ${redirectUri}`);
         console.error(`   - Client Secret: ${clientSecret ? 'défini (' + clientSecret.substring(0, 8) + '...)' : 'MANQUANT'}`);
         console.error(`   - URL de callback reçue: ${req.protocol}://${req.get('host')}${req.path}`);
-        
+
         // Vérifier si l'URL de redirection correspond
         const expectedUrl = redirectUri.toLowerCase();
         const actualUrl = `${req.protocol}://${req.get('host')}${req.path}`.toLowerCase();
@@ -221,7 +221,7 @@ export class AuthController {
           console.error(`      Attendu: ${expectedUrl}`);
           console.error(`      Reçu: ${actualUrl}`);
         }
-        
+
         const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3001';
         const errorMessage = encodeURIComponent(
           'Échec de l\'authentification. Vérifiez que le CLIENT_SECRET est correct et que l\'URL de redirection correspond exactement à celle configurée dans Azure Portal.'
@@ -234,25 +234,25 @@ export class AuthController {
 
       // Passer l'access token Azure AD pour récupérer les données depuis Graph
       const azureAccessToken = req.user?.accessToken || req.user?.azureAccessToken;
-      
+
       if (!azureAccessToken) {
         console.warn('⚠️  Aucun access token Azure AD trouvé dans req.user');
       }
 
       const result = await this.authService.login(req.user, azureAccessToken);
-      
+
       // Stocker le token Azure AD dans la session pour utilisation ultérieure
       if (azureAccessToken && req.session) {
         req.session.azureAccessToken = azureAccessToken;
         req.session.userId = req.user.id;
       }
-      
+
       // Rediriger vers le frontend via le fragment URL (#token=)
       // Le fragment n'est JAMAIS envoyé au serveur → évite le 431 sur Azure App Service
       // Le callback frontend lit déjà le token depuis window.location.hash (lignes 38-49)
       const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3001';
       const redirectUrl = `${frontendUrl}/callback#token=${encodeURIComponent(result.access_token)}`;
-      
+
       console.log(`🔄 Redirection vers: ${frontendUrl}/callback`);
       return res.redirect(redirectUrl);
     } catch (error: any) {
@@ -262,7 +262,7 @@ export class AuthController {
         name: error.name,
         query: req.query,
       });
-      
+
       const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3001';
       const errorUrl = `${frontendUrl}/callback?error=${encodeURIComponent(error.message || 'Erreur lors de l\'authentification')}`;
       return res.redirect(errorUrl);
@@ -322,7 +322,7 @@ export class AuthController {
     if (!token && user && (user as any).azureAccessToken) {
       token = (user as any).azureAccessToken;
     }
-    
+
     if (!token) {
       throw new Error('Token Azure AD requis. Utilisez le paramètre ?token=VOTRE_TOKEN ou connectez-vous via /auth/azure-ad');
     }
@@ -347,7 +347,7 @@ export class AuthController {
     if (!token && user && (user as any).azureAccessToken) {
       token = (user as any).azureAccessToken;
     }
-    
+
     if (!token) {
       throw new Error('Token Azure AD requis');
     }
@@ -385,7 +385,7 @@ export class AuthController {
         token = (user as any).azureAccessToken;
       }
     }
-    
+
     if (!token) {
       throw new BadRequestException(
         'Token Azure AD requis. ' +
@@ -400,7 +400,7 @@ export class AuthController {
 
   @Post('graph/explorer')
   @Public()
-  @ApiOperation({ 
+  @ApiOperation({
     summary: '🧪 TESTER: Appeler n\'importe quel endpoint Microsoft Graph API',
     description: 'Testez n\'importe quel endpoint Microsoft Graph API avec un token Azure AD. Entrez votre token et l\'endpoint Graph à appeler (ex: /me, /me/memberOf, /users, etc.)',
   })
@@ -408,13 +408,13 @@ export class AuthController {
     schema: {
       type: 'object',
       properties: {
-        token: { 
-          type: 'string', 
+        token: {
+          type: 'string',
           description: 'Token Azure AD obtenu depuis Graph Explorer (https://developer.microsoft.com/en-us/graph/graph-explorer)',
           example: 'eyJ0eXAiOiJKV1QiLCJub...',
         },
-        endpoint: { 
-          type: 'string', 
+        endpoint: {
+          type: 'string',
           default: '/me',
           description: 'Endpoint Graph API à appeler (ex: /me, /me/memberOf, /users, /me/messages, etc.)',
           example: '/me',
@@ -439,7 +439,7 @@ export class AuthController {
   async testGraphExplorer(@Body() body: { token: string; endpoint?: string }) {
     const endpoint = body.endpoint || '/me';
     const graphApiUrl = `https://graph.microsoft.com/v1.0${endpoint}`;
-    
+
     try {
       const axios = require('axios');
       const response = await axios.get(graphApiUrl, {
