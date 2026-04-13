@@ -62,13 +62,15 @@ export class AuthController {
     // Mais si ce n'est pas le cas, construire manuellement l'URL de redirection Azure AD
     console.log('🔄 Construction de l\'URL de redirection Azure AD...');
     
-    const tenantId = process.env.AZURE_AD_TENANT_ID || 'common';
-    const clientID = process.env.AZURE_AD_CLIENT_ID;
+    const tenantIdRaw = process.env.AZURE_AD_TENANT_ID;
+    const tenantId = tenantIdRaw ? tenantIdRaw.replace(/^["']|["']$/g, '').trim() : 'common';
+    const clientIDRaw = process.env.AZURE_AD_CLIENT_ID;
+    const clientID = clientIDRaw ? clientIDRaw.replace(/^["']|["']$/g, '').trim() : undefined;
     const envRedirect = process.env.AZURE_AD_REDIRECT_URI;
     const resolvedRedirectUri =
       envRedirect && envRedirect.includes(',')
-        ? envRedirect.split(',')[0].trim()
-        : envRedirect || 'http://localhost:3000/auth/azure-ad/callback';
+        ? envRedirect.split(',')[0].replace(/^["']|["']$/g, '').trim()
+        : envRedirect ? envRedirect.replace(/^["']|["']$/g, '').trim() : 'http://localhost:3000/auth/azure-ad/callback';
     const redirectUri = encodeURIComponent(resolvedRedirectUri);
     const scopes = encodeURIComponent('openid profile email User.Read offline_access');
     const state = Math.random().toString(36).substring(7); // Générer un state aléatoire
@@ -198,8 +200,8 @@ export class AuthController {
         const envRedirect2 = process.env.AZURE_AD_REDIRECT_URI;
         const redirectUri =
           envRedirect2 && envRedirect2.includes(',')
-            ? envRedirect2.split(',')[0].trim()
-            : envRedirect2 || 'http://localhost:3000/auth/azure-ad/callback';
+            ? envRedirect2.split(',')[0].replace(/^["']|["']$/g, '').trim()
+            : envRedirect2 ? envRedirect2.replace(/^["']|["']$/g, '').trim() : 'http://localhost:3000/auth/azure-ad/callback';
         const clientSecret = process.env.AZURE_AD_CLIENT_SECRET;
         console.error('   Configuration vérifiée:');
         console.error(`   - Redirect URI: ${redirectUri}`);

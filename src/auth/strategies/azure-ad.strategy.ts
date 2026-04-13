@@ -8,20 +8,25 @@ import type { IProfile, VerifyCallback } from 'passport-azure-ad';
 export class AzureADStrategy extends PassportStrategy(OIDCStrategy as any, 'azure-ad') {
   constructor(private configService: ConfigService) {
     // IMPORTANT: Utiliser le Tenant ID spécifique (pas 'common') pour limiter l'accès aux utilisateurs du tenant
-    const tenantId = configService.get<string>('AZURE_AD_TENANT_ID');
+    const tenantIdRaw = configService.get<string>('AZURE_AD_TENANT_ID');
+    const tenantId = tenantIdRaw ? tenantIdRaw.replace(/^["']|["']$/g, '').trim() : undefined;
 
     if (!tenantId || tenantId === 'common') {
       console.warn('⚠️  ATTENTION: AZURE_AD_TENANT_ID n\'est pas configuré ou est défini sur "common".');
       console.warn('   Pour limiter l\'accès aux utilisateurs du tenant, configurez un Tenant ID spécifique.');
     }
 
-    const clientID = configService.get<string>('AZURE_AD_CLIENT_ID');
-    const clientSecret = configService.get<string>('AZURE_AD_CLIENT_SECRET');
+    const clientIDRaw = configService.get<string>('AZURE_AD_CLIENT_ID');
+    const clientID = clientIDRaw ? clientIDRaw.replace(/^["']|["']$/g, '').trim() : undefined;
+    
+    const clientSecretRaw = configService.get<string>('AZURE_AD_CLIENT_SECRET');
+    const clientSecret = clientSecretRaw ? clientSecretRaw.replace(/^["']|["']$/g, '').trim() : undefined;
+    
     const envRedirect = configService.get<string>('AZURE_AD_REDIRECT_URI');
     const redirectUri =
       envRedirect && envRedirect.includes(',')
-        ? envRedirect.split(',')[0].trim()
-        : envRedirect || 'http://localhost:3000/auth/azure-ad/callback';
+        ? envRedirect.split(',')[0].replace(/^["']|["']$/g, '').trim()
+        : envRedirect ? envRedirect.replace(/^["']|["']$/g, '').trim() : 'http://localhost:3000/auth/azure-ad/callback';
 
     // Validation des paramètres requis
     if (!clientID || clientID.trim() === '') {
@@ -46,8 +51,8 @@ export class AzureADStrategy extends PassportStrategy(OIDCStrategy as any, 'azur
 
     const strategyOptions = {
       identityMetadata: `https://login.microsoftonline.com/${tenantId || 'common'}/v2.0/.well-known/openid-configuration`,
-      clientID: clientID.trim(),
-      clientSecret: clientSecret.trim(),
+      clientID: clientID!,
+      clientSecret: clientSecret!,
       // Utiliser 'code' au lieu de 'code id_token' pour éviter l'erreur AADSTS700054
       // Si vous voulez utiliser 'code id_token', activez "ID tokens" dans Azure Portal
       responseType: 'code' as const,
@@ -80,9 +85,9 @@ export class AzureADStrategy extends PassportStrategy(OIDCStrategy as any, 'azur
         accessTokenLength: accessToken?.length || 0,
       });
 
-      if (!profile || !profile.oid) {
-        console.error('❌ Profil Azure AD invalide:', profile);
-        return done(new UnauthorizedException('Profil Azure AD invalide'), null);
+      if (!profile || (!profile.oid && !profile.sub)) {
+        console.error('❌ Profil Azure AD invalide (aucun OID ou SUB):', profile);
+        return done(new UnauthorizedException('Profil Azure AD invalide: identifiant (oid ou sub) manquant'), null);
       }
 
       // Vérifier que l'utilisateur appartient au tenant configuré
@@ -115,10 +120,10 @@ export class AzureADStrategy extends PassportStrategy(OIDCStrategy as any, 'azur
       }
 
       const user = {
-        id: profile.oid,
+        id: profile.oid || profile.sub,
         email: email,
         name: profile.displayName || (profile.name && typeof profile.name === 'string' ? profile.name : '') || '',
-        sub: profile.oid,
+        sub: profile.oid || profile.sub,
         roles: (profile as any).roles || [],
         accessToken, // Token Azure AD pour Microsoft Graph API
         refreshToken,

@@ -10,7 +10,7 @@ async function bootstrap() {
 
   // Faire confiance au reverse proxy (nginx) pour lire le bon protocole
   // Sans cela, req.protocol retourne 'http' au lieu de 'https' → mismatch URL OAuth
-  app.getHttpAdapter().getInstance().set('trust proxy', 1);
+  app.getHttpAdapter().getInstance().set('trust proxy', true);
 
   // Configuration des sessions (requis pour passport-azure-ad)
   app.use(
