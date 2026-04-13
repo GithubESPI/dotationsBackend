@@ -73,7 +73,7 @@ export class AuthController {
         ? envRedirect.split(',')[0].replace(/^["']|["']$/g, '').trim()
         : envRedirect ? envRedirect.replace(/^["']|["']$/g, '').trim() : 'http://localhost:3000/auth/azure-ad/callback';
     const redirectUri = encodeURIComponent(resolvedRedirectUri);
-    const scopes = encodeURIComponent('openid profile email User.Read offline_access');
+    const scopes = encodeURIComponent('openid profile email User.Read offline_access User.Read.All');
     const state = Math.random().toString(36).substring(7); // Générer un state aléatoire
 
     console.log('🚀 [AUTH-DEBUG-STEP-1] Initialisation de l\'authentification Azure AD');
@@ -96,7 +96,7 @@ export class AuthController {
     }
 
     const authUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/authorize?client_id=${clientID}&response_type=code&redirect_uri=${redirectUri}&response_mode=query&scope=${scopes}&state=${state}`;
-    
+
     console.log('   - Redirection vers MicrosoftAuthorize: Success');
     return res.redirect(authUrl);
   }
