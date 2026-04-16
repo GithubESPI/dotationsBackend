@@ -1894,6 +1894,8 @@ export class JiraAssetService {
       return;
     }
 
+    let attributesDetails: any[] = [];
+
     // Auto-détection des attributs si non fournis
     if (!attributeMapping.statusAttrId || !attributeMapping.assignedUserAttrId) {
       try {
@@ -1903,8 +1905,8 @@ export class JiraAssetService {
         const asset = await this.getAssetFromJira(equipment.jiraAssetId);
         const objectTypeName = asset.objectType.name;
 
-        // 2. Récupérer les définitions d'attributs COMPLÈTES pour ce type (pour la détection par type)
-        const attributesDetails = await this.getObjectTypeAttributesDetails(objectTypeName);
+        // 2. Récupérer les définitions d'attributs COMPLÈTES pour ce type
+        attributesDetails = await this.getObjectTypeAttributesDetails(objectTypeName);
 
         // Reconstruire la map simple (ID -> Nom) pour detectAttributeIds
         const attributesMap: Record<string, string> = {};
@@ -1919,22 +1921,18 @@ export class JiraAssetService {
         }
 
         // 3b. Détecter l'attribut Utilisateur (on cherche de préférence un lien vers un Objet Asset "User")
-        // on cherche un champ qui s'appelle 'utilisateur', 'user', etc. BUT with Type=1 (Object) preference
-        const userAttribute = attributesDetails.find((a: any) =>
-          ['utilisateur', 'user', 'users', 'utilisateurs', 'collaborateur', 'employe'].includes(a.name.toLowerCase())
-        );
-
-        // Si on a plusieurs candidats, on privilégie "user" (Nom exact de l'Objet dans votre schéma)
         const specificUserAttr = attributesDetails.find((a: any) =>
           a.name.toLowerCase() === 'user' && a.type === 1
         );
 
-        // Fallback sur "Utilisateur" s'il n'y a pas "user"
         const fallbackUserAttr = attributesDetails.find((a: any) =>
           a.name.toLowerCase() === 'utilisateur' && a.type === 1
         );
 
-        // Si on trouve un attribut type Object, c'est celui-là qu'on veut !
+        const userAttribute = attributesDetails.find((a: any) =>
+          ['users', 'utilisateurs', 'collaborateur', 'employe'].includes(a.name.toLowerCase())
+        );
+
         const selectedUserAttr = specificUserAttr || fallbackUserAttr || userAttribute;
 
         if (selectedUserAttr) {
@@ -1942,38 +1940,38 @@ export class JiraAssetService {
           this.logger.debug(`   ✅ Utilisateur détecté: ID ${selectedUserAttr.id} (Type: ${selectedUserAttr.type}, Nom: ${selectedUserAttr.name})`);
         }
 
-        if (!attributeMapping.assignedUserAttrId && detected.assignedUserAttrId) {
-          attributeMapping.assignedUserAttrId = detected.assignedUserAttrId;
-          this.logger.debug(`   ✅ Utilisateur détecté via fallback: ID ${detected.assignedUserAttrId}`);
-        }
-
       } catch (error: any) {
         this.logger.error(`❌ Erreur lors de l'auto-détection des attributs: ${error.message}`);
       }
+    } else {
+        // Si les IDs sont fournis, on charge quand même les détails pour la détection des champs secondaires
+        try {
+            const asset = await this.getAssetFromJira(equipment.jiraAssetId);
+            attributesDetails = await this.getObjectTypeAttributesDetails(asset.objectType.name);
+        } catch (e) {}
     }
+
     // Construire le payload de mise à jour (statut + utilisateur uniquement)
+    const statusValue = this.mapEquipmentStatusToJira(equipment.status);
     const attributes = [
       {
         objectTypeAttributeId: attributeMapping.statusAttrId,
-        objectAttributeValues: [{ value: this.mapEquipmentStatusToJira(equipment.status) }],
+        objectAttributeValues: [{ value: statusValue }],
       },
     ];
-
-    // Log du payload pour debug
-    this.logger.debug(`📤 Payload mise à jour Jira (Status): ${JSON.stringify(attributes[0])}`);
 
     // Mettre à jour l'utilisateur affecté si l'attribut est configuré
     let jiraUserIdForLog: string | null = null;
     if (attributeMapping.assignedUserAttrId) {
       const user = equipment.currentUserId as any; // Cast car populate
-      if (user && user.email) {
-        // 1. Chercher si l'utilisateur existe dans les OBJETS Assets "Users"
-        await this.loadUserRegistry();
+      const isActuallyAssigned = equipment.status === EquipmentStatus.AFFECTE && user && user.email;
 
+      if (isActuallyAssigned) {
+        // En cas d'affectation
+        await this.loadUserRegistry();
         let assetUser = await this.findAssetUserByEmail(user.email, user.displayName);
         let userId = assetUser ? assetUser.id : null;
 
-        // 2. Si non trouvé, le créer dans Assets
         if (!userId) {
           const newUserObj = await this.createAssetUser({
             email: user.email,
@@ -1981,29 +1979,53 @@ export class JiraAssetService {
             lastName: user.lastName || user.displayName?.split(' ').slice(1).join(' ') || '',
             displayName: user.displayName || user.email
           });
-          if (newUserObj) {
-            userId = newUserObj.id;
-          }
+          if (newUserObj) userId = newUserObj.id;
         }
 
         if (userId) {
           jiraUserIdForLog = userId;
-          // L'attribut "Utilisateur" dans Laptop attend une référence à un objet Users
-          attributes.push({
-            objectTypeAttributeId: attributeMapping.assignedUserAttrId,
-            objectAttributeValues: [{ value: userId }], // Utilisation de l'ID interne
-          });
-          this.logger.debug(`📤 Payload mise à jour Jira (User): Email=${user.email} -> AssetID=${userId} (AttrID=${attributeMapping.assignedUserAttrId})`);
+          attributes.push({ objectTypeAttributeId: attributeMapping.assignedUserAttrId, objectAttributeValues: [{ value: userId }] });
+          
+          // Mise à jour des champs secondaires
+          const otherUserAttrs = attributesDetails ? attributesDetails.filter((a: any) => 
+            a.id !== attributeMapping.assignedUserAttrId && 
+            ['utilisateur', 'user'].includes(a.name.toLowerCase()) && 
+            a.type === 1 
+          ) : [];
+          
+          for (const attr of otherUserAttrs) {
+            attributes.push({
+              objectTypeAttributeId: attr.id,
+              objectAttributeValues: [{ value: userId }],
+            });
+          }
+
+          this.logger.debug(`📤 Payload mise à jour Jira (User): Email=${user.email} -> AssetID=${userId}`);
         } else {
-          this.logger.warn(`⚠️ Utilisateur ${user.email} introuvable et création échouée dans Assets. L'affectation sera ignorée.`);
+          this.logger.warn(`⚠️ Utilisateur ${user.email} introuvable et création échouée dans Assets.`);
         }
       } else {
-        // Libérer l'utilisateur dans Jira
+        // CAS : Restitution ou En Stock -> On VIDE le champ utilisateur dans Jira
+        this.logger.debug(`🧹 Vidage du champ utilisateur dans Jira (Status: ${equipment.status})`);
+        
         attributes.push({
           objectTypeAttributeId: attributeMapping.assignedUserAttrId,
-          objectAttributeValues: [],
+          objectAttributeValues: [], 
         });
-        this.logger.debug(`📤 Payload mise à jour Jira (User): Suppression (AttrID=${attributeMapping.assignedUserAttrId})`);
+        
+        // Vider aussi les champs secondaires
+        const otherUserAttrs = attributesDetails ? attributesDetails.filter((a: any) => 
+            a.id !== attributeMapping.assignedUserAttrId && 
+            ['utilisateur', 'user'].includes(a.name.toLowerCase()) && 
+            a.type === 1
+        ) : [];
+        
+        for (const attr of otherUserAttrs) {
+          attributes.push({
+            objectTypeAttributeId: attr.id,
+            objectAttributeValues: [],
+          });
+        }
       }
     }
 
@@ -2012,16 +2034,13 @@ export class JiraAssetService {
       const validAttributes = attributes.filter(a => a.objectTypeAttributeId);
 
       if (validAttributes.length === 0) {
-        this.logger.warn(`⚠️ Aucun attribut valide à mettre à jour pour l'équipement ${equipment.serialNumber}. IDs détectés: Status=${attributeMapping.statusAttrId}, User=${attributeMapping.assignedUserAttrId}`);
+        this.logger.warn(`⚠️ Aucun attribut valide à mettre à jour pour l'équipement ${equipment.serialNumber}.`);
         return;
       }
 
       await this.updateAssetInJira(equipment.jiraAssetId, validAttributes as any);
-      // Mettre à jour lastSyncedAt SANS recharger les données depuis Jira
-      // (le rechargement depuis Jira créerait une race condition car Jira n'a pas encore propagé le changement)
       await this.equipmentModel.findByIdAndUpdate(equipment._id, { lastSyncedAt: new Date() });
-      this.logger.log(`✅ Statut Jira mis à jour pour l'équipement ${equipment.serialNumber}: Status="${this.mapEquipmentStatusToJira(equipment.status)}", UserID=${jiraUserIdForLog || 'Libéré'}`);
-      this.logger.debug(`📊 Attributs utilisés: StatusID=${attributeMapping.statusAttrId}, UserID=${attributeMapping.assignedUserAttrId}`);
+      this.logger.log(`✅ Statut Jira mis à jour pour ${equipment.serialNumber}: Status="${statusValue}", User=${jiraUserIdForLog || 'Libéré'}`);
 
     } catch (error: any) {
       this.logger.error(`❌ Erreur lors de la mise à jour du statut Jira: ${error.message}`);

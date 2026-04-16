@@ -255,16 +255,15 @@ export class EquipmentService {
     const savedEquipment = await equipment.save();
 
     // Mettre à jour Jira si configuré et si le service est disponible
-    if (jiraConfig && this.jiraAssetService && equipment.jiraAssetId) {
+    if (this.jiraAssetService && equipment.jiraAssetId) {
       try {
         await this.jiraAssetService.updateEquipmentStatusInJira(equipmentId, {
-          statusAttrId: jiraConfig.statusAttrId,
-          assignedUserAttrId: jiraConfig.assignedUserAttrId,
+          statusAttrId: jiraConfig?.statusAttrId,
+          assignedUserAttrId: jiraConfig?.assignedUserAttrId,
         });
         this.logger.log(`✅ Statut Jira mis à jour pour l'équipement ${equipment.serialNumber}`);
       } catch (error: any) {
         this.logger.warn(`⚠️ Impossible de mettre à jour Jira: ${error.message}`);
-        // Ne pas faire échouer l'affectation si Jira n'est pas disponible
       }
     }
 
@@ -282,16 +281,15 @@ export class EquipmentService {
     const savedEquipment = await equipment.save();
 
     // Mettre à jour Jira si configuré et si le service est disponible
-    if (jiraConfig && this.jiraAssetService && equipment.jiraAssetId) {
+    if (this.jiraAssetService && equipment.jiraAssetId) {
       try {
         await this.jiraAssetService.updateEquipmentStatusInJira(equipmentId, {
-          statusAttrId: jiraConfig.statusAttrId,
-          assignedUserAttrId: jiraConfig.assignedUserAttrId,
+          statusAttrId: jiraConfig?.statusAttrId,
+          assignedUserAttrId: jiraConfig?.assignedUserAttrId,
         });
         this.logger.log(`✅ Statut Jira mis à jour pour l'équipement ${equipment.serialNumber}`);
       } catch (error: any) {
         this.logger.warn(`⚠️ Impossible de mettre à jour Jira: ${error.message}`);
-        // Ne pas faire échouer la libération si Jira n'est pas disponible
       }
     }
 
