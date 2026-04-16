@@ -145,6 +145,18 @@ export class EquipmentController {
     return this.equipmentService.release(id);
   }
 
+  @Post(':id/in-stock')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Remettre un matériel en stock' })
+  @ApiParam({ name: 'id', description: 'ID MongoDB du matériel' })
+  @ApiResponse({
+    status: 200,
+    description: 'Matériel remis en stock avec succès',
+  })
+  async markAsInStock(@Param('id') id: string) {
+    return this.equipmentService.markAsInStock(id);
+  }
+
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Supprimer un matériel' })

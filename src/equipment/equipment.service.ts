@@ -192,7 +192,7 @@ export class EquipmentService {
   async findAvailable(): Promise<EquipmentDocument[]> {
     return this.equipmentModel
       .find({
-        status: EquipmentStatus.EN_STOCK,
+        status: { $in: [EquipmentStatus.EN_STOCK, EquipmentStatus.RESTITUE] },
         currentUserId: null,
       })
       .sort({ brand: 1, model: 1 })
@@ -240,7 +240,7 @@ export class EquipmentService {
   async assignToUser(equipmentId: string, userId: string, jiraConfig?: { statusAttrId: string; assignedUserAttrId?: string }): Promise<EquipmentDocument> {
     const equipment = await this.findOne(equipmentId);
 
-    if (equipment.status !== EquipmentStatus.EN_STOCK) {
+    if (equipment.status !== EquipmentStatus.EN_STOCK && equipment.status !== EquipmentStatus.RESTITUE) {
       throw new BadRequestException(
         `Le matériel n'est pas disponible. Statut actuel: ${equipment.status}`
       );
@@ -290,6 +290,33 @@ export class EquipmentService {
         this.logger.log(`✅ Statut Jira mis à jour pour l'équipement ${equipment.serialNumber}`);
       } catch (error: any) {
         this.logger.warn(`⚠️ Impossible de mettre à jour Jira: ${error.message}`);
+      }
+    }
+
+    return savedEquipment;
+  }
+
+  /**
+   * Passer manuellement un matériel en stock (depuis Restitué ou Rebut)
+   */
+  async markAsInStock(equipmentId: string, jiraConfig?: { statusAttrId: string }): Promise<EquipmentDocument> {
+    const equipment = await this.findOne(equipmentId);
+
+    this.logger.log(`📥 Remise en stock manuelle de l'équipement ${equipment.serialNumber} (ID: ${equipmentId})`);
+    
+    equipment.status = EquipmentStatus.EN_STOCK;
+    equipment.currentUserId = undefined;
+    const savedEquipment = await equipment.save();
+
+    // Mettre à jour Jira si configuré
+    if (this.jiraAssetService && equipment.jiraAssetId) {
+      try {
+        await this.jiraAssetService.updateEquipmentStatusInJira(equipmentId, {
+          statusAttrId: jiraConfig?.statusAttrId,
+        });
+        this.logger.log(`✅ Statut Jira mis à jour pour l'équipement ${equipment.serialNumber} (EN STOCK)`);
+      } catch (error: any) {
+        this.logger.warn(`⚠️ Impossible de mettre à jour Jira lors de la remise en stock: ${error.message}`);
       }
     }
 
