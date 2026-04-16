@@ -1,6 +1,6 @@
 import { IsString, IsOptional, IsEnum, IsInt, Min, Max } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { Type, Transform } from 'class-transformer';
 import { EquipmentType, EquipmentStatus } from '../../database/schemas/equipment.schema';
 
 export class SearchEquipmentDto {
@@ -21,6 +21,7 @@ export class SearchEquipmentDto {
 
   @ApiPropertyOptional({ description: 'Filtrer par statut', enum: EquipmentStatus })
   @IsOptional()
+  @Transform(({ value }) => typeof value === 'string' ? value.toLowerCase() : value)
   @IsEnum(EquipmentStatus)
   status?: EquipmentStatus;
 

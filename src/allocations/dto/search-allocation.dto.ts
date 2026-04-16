@@ -1,6 +1,6 @@
 import { IsString, IsOptional, IsEnum, IsInt, Min, Max, IsMongoId } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { Type, Transform } from 'class-transformer';
 import { AllocationStatus } from '../../database/schemas/allocation.schema';
 
 export class SearchAllocationDto {
@@ -16,6 +16,7 @@ export class SearchAllocationDto {
 
   @ApiPropertyOptional({ description: 'Filtrer par statut', enum: AllocationStatus })
   @IsOptional()
+  @Transform(({ value }) => typeof value === 'string' ? value.toLowerCase() : value)
   @IsEnum(AllocationStatus)
   status?: AllocationStatus;
 
