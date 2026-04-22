@@ -82,9 +82,11 @@ export class JiraAssetService {
   private userRegistryLoadedAt: number = 0;
   private readonly USER_REGISTRY_TTL_MS = 10 * 60_000; // 10 minutes (doublé pour plus de stabilité)
   
-  // ID de l'attribut Email dans le type d'objet "Users" (détecté au chargement du registre)
+  // ID et NOM de l'attribut Email dans le type d'objet "Users" (détecté au chargement du registre)
   private userEmailAttrId: string | null = null;
+  private userEmailAttrName: string | null = null; // Nom réel de l'attribut (ex: "Email", "E-mail") pour les requêtes AQL
   private userNameAttrId: string | null = null;
+  private userNameAttrName: string | null = null; // Nom réel de l'attribut (ex: "Nom", "Name") pour les requêtes AQL
 
   constructor(
     private readonly configService: ConfigService,
@@ -185,9 +187,13 @@ export class JiraAssetService {
         if (userOt) {
           const attributesDefinition = await this.getObjectTypeAttributesDetails('Users', 'Parc Informatique');
           const findAttr = (names: string[]) => attributesDefinition.find(a => names.includes(a.name.toLowerCase()));
-          this.userEmailAttrId = findAttr(['email', 'e-mail', 'mail'])?.id || null;
-          this.userNameAttrId = findAttr(['nom complet', 'name', 'nom'])?.id || null;
-          this.logger.debug(`🎯 Attributs détectés pour "Users": Email=${this.userEmailAttrId}, Nom=${this.userNameAttrId}`);
+          const emailAttrDef = findAttr(['email', 'e-mail', 'mail']);
+          const nameAttrDef = findAttr(['nom complet', 'name', 'nom']);
+          this.userEmailAttrId = emailAttrDef?.id || null;
+          this.userEmailAttrName = emailAttrDef?.name || null; // Stocker le NOM pour les requêtes AQL
+          this.userNameAttrId = nameAttrDef?.id || null;
+          this.userNameAttrName = nameAttrDef?.name || null; // Stocker le NOM pour les requêtes AQL
+          this.logger.debug(`🎯 Attributs détectés pour "Users": Email=${this.userEmailAttrId} ("${this.userEmailAttrName}"), Nom=${this.userNameAttrId} ("${this.userNameAttrName}")`);
         }
       }
 
@@ -318,18 +324,20 @@ export class JiraAssetService {
     try {
       const queryParts: string[] = [];
       if (email) {
-        // Utiliser l'ID d'attribut email détecté s'il existe
-        if (this.userEmailAttrId) {
-          queryParts.push(`"${this.userEmailAttrId}" = "${email}"`);
+        // IMPORTANT: Utiliser le NOM de l'attribut (pas l'ID) pour les requêtes AQL
+        if (this.userEmailAttrName) {
+          queryParts.push(`"${this.userEmailAttrName}" = "${email}"`);
         } else {
+          // Fallback: essayer les noms les plus courants
           queryParts.push(`"Email" = "${email}"`);
           queryParts.push(`"E-mail" = "${email}"`);
           queryParts.push(`"mail" = "${email}"`);
         }
       }
       if (normalizedDisplayName) {
-        if (this.userNameAttrId) {
-          queryParts.push(`"${this.userNameAttrId}" = "${normalizedDisplayName}"`);
+        // IMPORTANT: Utiliser le NOM de l'attribut (pas l'ID) pour les requêtes AQL
+        if (this.userNameAttrName) {
+          queryParts.push(`"${this.userNameAttrName}" = "${normalizedDisplayName}"`);
         } else {
           queryParts.push(`"Name" = "${normalizedDisplayName}"`);
           queryParts.push(`"Nom Complet" = "${normalizedDisplayName}"`);
@@ -340,17 +348,22 @@ export class JiraAssetService {
       if (queryParts.length === 0) return null;
 
       const query = `objectType = "${objectTypeName}" AND (${queryParts.join(' OR ')})`;
+      this.logger.debug(`🔍 Requête AQL utilisateur: ${query}`);
       const results = await this.searchAssetsInJira(objectTypeName, query, 10);
 
       if (results.length > 0) {
         const bestMatch = results.sort((a, b) => parseInt(a.id) - parseInt(b.id))[0];
         this.userCache.set(searchKey, { user: bestMatch, expiresAt: Date.now() + this.USER_CACHE_TTL_MS });
+        this.logger.debug(`✅ Utilisateur trouvé via AQL: ID=${bestMatch.id}`);
         return bestMatch;
       }
+      this.logger.debug(`⚠️ Aucun utilisateur trouvé via AQL pour: "${email || normalizedDisplayName}"`);
       return null;
     } catch (error: any) {
       this.logger.error(`❌ Erreur recherche utilisateur "${normalizedDisplayName}": ${error.message}`);
-      throw error;
+      // NE PAS propager l'erreur - retourner null pour ne pas bloquer la mise à jour Jira
+      // Le statut sera mis à jour même si la recherche utilisateur échoue
+      return null;
     }
   }
 
@@ -1894,6 +1907,8 @@ export class JiraAssetService {
       return;
     }
 
+    this.logger.log(`🔄 [JIRA SYNC] Début mise à jour Jira pour ${equipment.serialNumber} (jiraAssetId: ${equipment.jiraAssetId}, status MongoDB: ${equipment.status})`);
+
     let attributesDetails: any[] = [];
 
     // Auto-détection des attributs si non fournis
@@ -1904,9 +1919,11 @@ export class JiraAssetService {
         // 1. Récupérer l'asset pour connaître son type et ses attributs actuels
         const asset = await this.getAssetFromJira(equipment.jiraAssetId);
         const objectTypeName = asset.objectType.name;
+        this.logger.debug(`   📦 Type d'objet Jira: "${objectTypeName}"`);
 
         // 2. Récupérer les définitions d'attributs COMPLÈTES pour ce type
         attributesDetails = await this.getObjectTypeAttributesDetails(objectTypeName);
+        this.logger.debug(`   📋 ${attributesDetails.length} attributs trouvés pour "${objectTypeName}"`);
 
         // Reconstruire la map simple (ID -> Nom) pour detectAttributeIds
         const attributesMap: Record<string, string> = {};
@@ -1914,34 +1931,64 @@ export class JiraAssetService {
 
         // 3. Utiliser la méthode de détection existante
         const detected = this.detectAttributeIds(asset, attributesMap);
+        this.logger.debug(`   🎯 Attributs détectés automatiquement: Status=${detected.statusAttrId || 'NON DÉTECTÉ'}, User=${detected.assignedUserAttrId || 'NON DÉTECTÉ'}`);
 
         if (!attributeMapping.statusAttrId && detected.statusAttrId) {
           attributeMapping.statusAttrId = detected.statusAttrId;
-          this.logger.debug(`   ✅ Statut détecté: ID ${detected.statusAttrId}`);
+          this.logger.log(`   ✅ Statut détecté via detectAttributeIds: ID ${detected.statusAttrId}`);
+        }
+
+        // 3a. Fallback: Recherche directe de l'attribut Status par nom dans les définitions
+        if (!attributeMapping.statusAttrId) {
+          const statusAttr = attributesDetails.find((a: any) => {
+            const lname = a.name.toLowerCase();
+            return lname === 'status' || lname === 'statut' || lname === 'état' || lname === 'etat';
+          });
+          if (statusAttr) {
+            attributeMapping.statusAttrId = statusAttr.id;
+            this.logger.log(`   ✅ Statut détecté via nom d'attribut: ID ${statusAttr.id} (Nom: "${statusAttr.name}", Type: ${statusAttr.type})`);
+          } else {
+            this.logger.error(`   ❌ IMPOSSIBLE de détecter l'attribut Status ! Attributs disponibles: ${attributesDetails.map(a => `"${a.name}" (ID:${a.id}, Type:${a.type})`).join(', ')}`);
+          }
         }
 
         // 3b. Détecter l'attribut Utilisateur (on cherche de préférence un lien vers un Objet Asset "User")
-        const specificUserAttr = attributesDetails.find((a: any) =>
-          a.name.toLowerCase() === 'user' && a.type === 1
-        );
+        if (!attributeMapping.assignedUserAttrId) {
+          // Recherche prioritaire: attribut nommé 'user' de type Object (1)
+          const specificUserAttr = attributesDetails.find((a: any) =>
+            a.name.toLowerCase() === 'user' && a.type === 1
+          );
 
-        const fallbackUserAttr = attributesDetails.find((a: any) =>
-          a.name.toLowerCase() === 'utilisateur' && a.type === 1
-        );
+          // Fallback 1: attribut nommé 'utilisateur' de type Object (1)
+          const fallbackUserAttr = attributesDetails.find((a: any) =>
+            a.name.toLowerCase() === 'utilisateur' && a.type === 1
+          );
 
-        const userAttribute = attributesDetails.find((a: any) =>
-          ['users', 'utilisateurs', 'collaborateur', 'employe'].includes(a.name.toLowerCase())
-        );
+          // Fallback 2: autres noms courants (type Object ou non pour plus de robustesse)
+          const userAttribute = attributesDetails.find((a: any) =>
+            ['users', 'utilisateurs', 'collaborateur', 'collaborateurs', 'employe', 'employé', 'owner', 'assigned', 'assignee'].includes(a.name.toLowerCase()) && a.type === 1
+          );
 
-        const selectedUserAttr = specificUserAttr || fallbackUserAttr || userAttribute;
+          // Fallback 3: utiliser le résultat de detectAttributeIds
+          const detectedUserAttr = detected.assignedUserAttrId
+            ? attributesDetails.find((a: any) => a.id === detected.assignedUserAttrId)
+            : null;
 
-        if (selectedUserAttr) {
-          attributeMapping.assignedUserAttrId = selectedUserAttr.id;
-          this.logger.debug(`   ✅ Utilisateur détecté: ID ${selectedUserAttr.id} (Type: ${selectedUserAttr.type}, Nom: ${selectedUserAttr.name})`);
+          const selectedUserAttr = specificUserAttr || fallbackUserAttr || userAttribute || detectedUserAttr;
+
+          if (selectedUserAttr) {
+            attributeMapping.assignedUserAttrId = selectedUserAttr.id;
+            this.logger.log(`   ✅ Utilisateur détecté: ID ${selectedUserAttr.id} (Type: ${selectedUserAttr.type}, Nom: "${selectedUserAttr.name}")`);
+          } else {
+            this.logger.warn(`   ⚠️ IMPOSSIBLE de détecter l'attribut Utilisateur ! Attributs de type Object (1): ${attributesDetails.filter(a => a.type === 1).map(a => `"${a.name}" (ID:${a.id})`).join(', ') || 'AUCUN'}`);
+          }
         }
 
       } catch (error: any) {
         this.logger.error(`❌ Erreur lors de l'auto-détection des attributs: ${error.message}`);
+        if (error.response?.data) {
+          this.logger.error(`   Détails API: ${JSON.stringify(error.response.data)}`);
+        }
       }
     } else {
         // Si les IDs sont fournis, on charge quand même les détails pour la détection des champs secondaires
@@ -1951,14 +1998,25 @@ export class JiraAssetService {
         } catch (e) {}
     }
 
+    // Vérifier qu'au moins un attribut a été détecté
+    if (!attributeMapping.statusAttrId && !attributeMapping.assignedUserAttrId) {
+      this.logger.error(`❌ [JIRA SYNC] Aucun attribut (Status ni User) n'a pu être détecté pour ${equipment.serialNumber}. Mise à jour Jira annulée.`);
+      return;
+    }
+
     // Construire le payload de mise à jour (statut + utilisateur uniquement)
     const statusValue = this.mapEquipmentStatusToJira(equipment.status);
-    const attributes = [
-      {
+    this.logger.log(`   📊 Valeur de statut à envoyer: MongoDB="${equipment.status}" → Jira="${statusValue}"`);
+    
+    const attributes: Array<{ objectTypeAttributeId: string | undefined; objectAttributeValues: Array<{ value: any }> }> = [];
+
+    // Ajouter l'attribut Status seulement s'il est détecté
+    if (attributeMapping.statusAttrId) {
+      attributes.push({
         objectTypeAttributeId: attributeMapping.statusAttrId,
         objectAttributeValues: [{ value: statusValue }],
-      },
-    ];
+      });
+    }
 
     // Mettre à jour l'utilisateur affecté si l'attribut est configuré
     let jiraUserIdForLog: string | null = null;
@@ -1968,11 +2026,13 @@ export class JiraAssetService {
 
       if (isActuallyAssigned) {
         // En cas d'affectation
+        this.logger.log(`   👤 Affectation: recherche de l'utilisateur Asset pour ${user.email} (${user.displayName})`);
         await this.loadUserRegistry();
         let assetUser = await this.findAssetUserByEmail(user.email, user.displayName);
         let userId = assetUser ? assetUser.id : null;
 
         if (!userId) {
+          this.logger.log(`   👤 Utilisateur non trouvé dans Assets, création...`);
           const newUserObj = await this.createAssetUser({
             email: user.email,
             firstName: user.firstName || user.displayName?.split(' ')[0] || '',
@@ -2000,13 +2060,13 @@ export class JiraAssetService {
             });
           }
 
-          this.logger.debug(`📤 Payload mise à jour Jira (User): Email=${user.email} -> AssetID=${userId}`);
+          this.logger.log(`   📤 Payload utilisateur: Email=${user.email} → AssetID=${userId}`);
         } else {
-          this.logger.warn(`⚠️ Utilisateur ${user.email} introuvable et création échouée dans Assets.`);
+          this.logger.warn(`⚠️ Utilisateur ${user.email} introuvable et création échouée dans Assets. Le champ User ne sera pas mis à jour.`);
         }
       } else {
         // CAS : Restitution ou En Stock -> On VIDE le champ utilisateur dans Jira
-        this.logger.debug(`🧹 Vidage du champ utilisateur dans Jira (Status: ${equipment.status})`);
+        this.logger.log(`   🧹 Vidage du champ utilisateur dans Jira (Status: ${equipment.status})`);
         
         attributes.push({
           objectTypeAttributeId: attributeMapping.assignedUserAttrId,
@@ -2029,26 +2089,41 @@ export class JiraAssetService {
       }
     }
 
-    try {
-      // Filtrer les attributs dont l'ID est manquant
-      const validAttributes = attributes.filter(a => a.objectTypeAttributeId);
+    // Filtrer les attributs dont l'ID est manquant
+    const validAttributes = attributes.filter(a => a.objectTypeAttributeId);
 
-      if (validAttributes.length === 0) {
-        this.logger.warn(`⚠️ Aucun attribut valide à mettre à jour pour l'équipement ${equipment.serialNumber}.`);
-        return;
+    if (validAttributes.length === 0) {
+      this.logger.warn(`⚠️ [JIRA SYNC] Aucun attribut valide à mettre à jour pour l'équipement ${equipment.serialNumber}. Tous les IDs sont undefined.`);
+      this.logger.warn(`   StatusAttrId=${attributeMapping.statusAttrId}, UserAttrId=${attributeMapping.assignedUserAttrId}`);
+      return;
+    }
+
+    this.logger.log(`   📤 [JIRA SYNC] Envoi payload pour ${equipment.serialNumber}: ${validAttributes.length} attribut(s) à mettre à jour`);
+    this.logger.debug(`   📤 Payload complet: ${JSON.stringify(validAttributes)}`);
+
+    // Tentative d'envoi avec retry automatique
+    const maxRetries = 2;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        await this.updateAssetInJira(equipment.jiraAssetId, validAttributes as any);
+        await this.equipmentModel.findByIdAndUpdate(equipment._id, { lastSyncedAt: new Date() });
+        this.logger.log(`✅ [JIRA SYNC] Statut Jira mis à jour avec succès pour ${equipment.serialNumber}: Status="${statusValue}", User=${jiraUserIdForLog || 'Libéré'}`);
+        return; // Succès, on sort
+      } catch (error: any) {
+        this.logger.error(`❌ [JIRA SYNC] Tentative ${attempt}/${maxRetries} échouée pour ${equipment.serialNumber}: ${error.message}`);
+        if (error.response?.status) {
+          this.logger.error(`   HTTP Status: ${error.response.status}`);
+        }
+        if (error.response?.data) {
+          this.logger.error(`   Détails erreur Jira: ${JSON.stringify(error.response.data)}`);
+        }
+        if (attempt < maxRetries) {
+          this.logger.log(`   🔄 Nouvelle tentative dans 2 secondes...`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+        // Ne pas faire échouer l'opération si Jira n'est pas disponible
+        // L'utilisateur peut toujours affecter/libérer l'équipement dans MongoDB
       }
-
-      await this.updateAssetInJira(equipment.jiraAssetId, validAttributes as any);
-      await this.equipmentModel.findByIdAndUpdate(equipment._id, { lastSyncedAt: new Date() });
-      this.logger.log(`✅ Statut Jira mis à jour pour ${equipment.serialNumber}: Status="${statusValue}", User=${jiraUserIdForLog || 'Libéré'}`);
-
-    } catch (error: any) {
-      this.logger.error(`❌ Erreur lors de la mise à jour du statut Jira: ${error.message}`);
-      if (error.response?.data) {
-        this.logger.error(`Détails erreur Jira: ${JSON.stringify(error.response.data)}`);
-      }
-      // Ne pas faire échouer l'opération si Jira n'est pas disponible
-      // L'utilisateur peut toujours affecter/libérer l'équipement dans MongoDB
     }
   }
 

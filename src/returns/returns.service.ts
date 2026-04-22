@@ -114,15 +114,20 @@ export class ReturnsService {
       // Mettre à jour Jira automatiquement si l'équipement est lié
       if (equipment.jiraAssetId) {
         try {
-          this.logger.debug(`🔄 Mise à jour Jira pour l'équipement ${equipment.serialNumber} (Retour en stock)`);
+          this.logger.log(`🔄 [RESTITUTION→JIRA] Mise à jour Jira pour ${equipment.serialNumber} (jiraAssetId: ${equipment.jiraAssetId}, status: EN STOCK, user: Libéré)`);
           await this.jiraAssetService.updateEquipmentStatusInJira(equipment._id.toString(), {
             statusAttrId: undefined, // Sera détecté automatiquement
             assignedUserAttrId: undefined, // Sera détecté automatiquement
           });
-          this.logger.debug(`✅ Jira mis à jour pour ${equipment.serialNumber}`);
+          this.logger.log(`✅ [RESTITUTION→JIRA] Jira synchronisé avec succès pour ${equipment.serialNumber}`);
         } catch (error: any) {
-          this.logger.warn(`⚠️ Impossible de mettre à jour Jira pour ${equipment.serialNumber}: ${error.message}`);
+          this.logger.error(`❌ [RESTITUTION→JIRA] Échec synchronisation Jira pour ${equipment.serialNumber}: ${error.message}`);
+          if (error.response?.data) {
+            this.logger.error(`   Détails API: ${JSON.stringify(error.response.data)}`);
+          }
         }
+      } else {
+        this.logger.debug(`ℹ️ Équipement ${equipment.serialNumber} n'a pas de jiraAssetId, pas de sync Jira`);
       }
     }
 

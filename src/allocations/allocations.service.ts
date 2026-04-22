@@ -250,19 +250,24 @@ export class AllocationsService {
       // Mettre à jour Jira automatiquement si l'équipement est synchronisé avec Jira
       if (equipment.jiraAssetId && this.jiraAssetService) {
         try {
-          this.logger.debug(`🔄 Mise à jour Jira pour l'équipement ${equipment.serialNumber} (jiraAssetId: ${equipment.jiraAssetId})`);
+          this.logger.log(`🔄 [ALLOCATION→JIRA] Mise à jour Jira pour ${equipment.serialNumber} (jiraAssetId: ${equipment.jiraAssetId}, status: AFFECTE, user: ${user.displayName})`);
           // Mettre à jour uniquement le statut et l'utilisateur dans Jira (méthode optimisée)
           await this.jiraAssetService.updateEquipmentStatusInJira(equipment._id.toString(), {
-            statusAttrId: undefined, // Sera détecté automatiquement si configuré
-            assignedUserAttrId: undefined, // Sera détecté automatiquement si configuré
+            statusAttrId: undefined, // Sera détecté automatiquement
+            assignedUserAttrId: undefined, // Sera détecté automatiquement
           });
-          this.logger.debug(`✅ Jira mis à jour pour ${equipment.serialNumber}`);
+          this.logger.log(`✅ [ALLOCATION→JIRA] Jira synchronisé avec succès pour ${equipment.serialNumber}`);
         } catch (error: any) {
           // Ne pas faire échouer l'allocation si Jira n'est pas disponible
-          this.logger.warn(`⚠️ Impossible de mettre à jour Jira pour ${equipment.serialNumber}: ${error.message}`);
+          this.logger.error(`❌ [ALLOCATION→JIRA] Échec synchronisation Jira pour ${equipment.serialNumber}: ${error.message}`);
+          if (error.response?.data) {
+            this.logger.error(`   Détails API: ${JSON.stringify(error.response.data)}`);
+          }
         }
       } else if (equipment.jiraAssetId && !this.jiraAssetService) {
-        this.logger.debug(`ℹ️ Équipement ${equipment.serialNumber} a un jiraAssetId mais le service Jira n'est pas disponible`);
+        this.logger.warn(`⚠️ [ALLOCATION→JIRA] Équipement ${equipment.serialNumber} a un jiraAssetId (${equipment.jiraAssetId}) mais le service Jira n'est pas injecté ! La synchronisation ne fonctionnera pas.`);
+      } else if (!equipment.jiraAssetId) {
+        this.logger.debug(`ℹ️ Équipement ${equipment.serialNumber} n'a pas de jiraAssetId, pas de sync Jira`);
       }
     }
 
